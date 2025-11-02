@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { login } from '../utils/auth'
+import '../App.css'
 
-const Login = ({ onLogin }) => {
+export default function Login({ onLogin }) {
   const [credentials, setCredentials] = useState({
     username: '',
     password: ''
@@ -11,19 +12,13 @@ const Login = ({ onLogin }) => {
 
   const handleSubmit = async (e) => {
     e.preventDefault()
-    setLoading(true)
     setError('')
-
-    if (!credentials.username || !credentials.password) {
-      setError('Please enter username and password')
-      setLoading(false)
-      return
-    }
+    setLoading(true)
 
     try {
       const success = await login(credentials.username, credentials.password)
       if (success) {
-        onLogin()
+        if (onLogin) onLogin()
       } else {
         setError('Invalid username or password')
       }
@@ -35,60 +30,68 @@ const Login = ({ onLogin }) => {
     }
   }
 
+  const handleChange = (e) => {
+    setCredentials({
+      ...credentials,
+      [e.target.name]: e.target.value
+    })
+  }
+
   return (
     <div className="login-container">
-      <div className="login-form">
-        <div className="login-header">
-          <h1>📚 Library Admin</h1>
-          <p>Management System</p>
-        </div>
+      <div className="login-card">
+        <h1>📚 Library Management System</h1>
+        <p className="login-subtitle">Sign in to continue</p>
 
-        <form onSubmit={handleSubmit}>
+        <form onSubmit={handleSubmit} className="login-form">
+          {error && (
+            <div className="error-message">
+              {error}
+            </div>
+          )}
+
           <div className="form-group">
             <label htmlFor="username">Username</label>
             <input
-              id="username"
               type="text"
-              placeholder="Enter username"
+              id="username"
+              name="username"
               value={credentials.username}
-              onChange={(e) => setCredentials({
-                ...credentials,
-                username: e.target.value
-              })}
-              disabled={loading}
+              onChange={handleChange}
+              placeholder="Enter username"
+              required
+              autoFocus
             />
           </div>
 
           <div className="form-group">
             <label htmlFor="password">Password</label>
             <input
-              id="password"
               type="password"
-              placeholder="Enter password"
+              id="password"
+              name="password"
               value={credentials.password}
-              onChange={(e) => setCredentials({
-                ...credentials,
-                password: e.target.value
-              })}
-              disabled={loading}
+              onChange={handleChange}
+              placeholder="Enter password"
+              required
             />
           </div>
 
-          {error && <div className="error-message">{error}</div>}
-
-          <button type="submit" disabled={loading} className="login-btn">
-            {loading ? 'Logging in...' : 'Login'}
+          <button 
+            type="submit" 
+            className="btn btn-primary btn-block"
+            disabled={loading}
+          >
+            {loading ? 'Signing in...' : 'Sign In'}
           </button>
         </form>
 
-        <div className="demo-credentials">
+        <div className="login-help">
           <p><strong>Demo Credentials:</strong></p>
-          <p>Username: <code>admin</code></p>
-          <p>Password: <code>admin123</code></p>
+          <p>Admin: admin / admin123</p>
+          <p>Student: student1 / pass123</p>
         </div>
       </div>
     </div>
   )
 }
-
-export default Login
