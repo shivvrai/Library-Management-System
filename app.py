@@ -17,6 +17,17 @@ app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'library-system-
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=24)
 jwt = JWTManager(app)
 
+try:
+    from database import init_database  # Correct function name!
+    if not os.path.exists('library.db'):
+        print("🔄 Initializing new database...")
+        init_database()
+        print("✅ Database created with default admin user")
+    else:
+        print("✅ Using existing database")
+except Exception as e:
+    print(f"❌ Database error: {e}")
+
 # Constants
 FINE_PER_DAY = 10
 MAX_BOOKS_PER_STUDENT = 3
