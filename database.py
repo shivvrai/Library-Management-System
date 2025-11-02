@@ -1,9 +1,10 @@
-# database.py - SQLite Database Models and Initialization
+# database.py - Updated with 8-digit registration numbers
 
 import sqlite3
 import bcrypt
 from datetime import datetime, timedelta
 import os
+import random
 
 DATABASE_NAME = 'library.db'
 
@@ -20,6 +21,33 @@ def hash_password(password):
 def verify_password(password, hashed):
     """Verify password against hash"""
     return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+
+def generate_registration_number():
+    """Generate unique 8-digit registration number"""
+    conn = get_db_connection()
+    
+    while True:
+        # Generate random 8-digit number (10000000 to 99999999)
+        reg_no = str(random.randint(10000000, 99999999))
+        
+        # Check if it already exists
+        existing = conn.execute('SELECT id FROM students WHERE registration_no = ?', (reg_no,)).fetchone()
+        
+        if not existing:
+            conn.close()
+            return reg_no
+
+def get_next_transaction_id():
+    """Generate next transaction ID"""
+    conn = get_db_connection()
+    last_txn = conn.execute('SELECT transaction_id FROM transactions ORDER BY id DESC LIMIT 1').fetchone()
+    conn.close()
+    
+    if not last_txn:
+        return 'TXN0001'
+    
+    last_num = int(last_txn['transaction_id'][3:])
+    return f'TXN{str(last_num + 1).zfill(4)}'
 
 def init_database():
     """Initialize database with tables and default data"""
@@ -40,22 +68,23 @@ def init_database():
             password TEXT NOT NULL,
             name TEXT NOT NULL,
             role TEXT DEFAULT 'admin',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_timestamp
         )
     ''')
     
-    # Create students table
+    # Create students table with 8-digit registration_no
     cursor.execute('''
         CREATE TABLE students (
-            id TEXT PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            registration_no TEXT UNIQUE NOT NULL,
             username TEXT UNIQUE NOT NULL,
             password TEXT NOT NULL,
             name TEXT NOT NULL,
             email TEXT NOT NULL,
             phone TEXT NOT NULL,
-            borrowed_books INTEGER DEFAULT 0,
-            fine_amount REAL DEFAULT 0.0,
             role TEXT DEFAULT 'student',
+            borrowed_books INTEGER DEFAULT 0,
+            fine_amount REAL DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -67,11 +96,11 @@ def init_database():
             title TEXT NOT NULL,
             author TEXT NOT NULL,
             isbn TEXT UNIQUE NOT NULL,
-            pages INTEGER NOT NULL,
-            price REAL NOT NULL,
-            category TEXT NOT NULL,
-            quantity INTEGER NOT NULL,
-            available INTEGER NOT NULL,
+            pages INTEGER,
+            price REAL,
+            category TEXT,
+            quantity INTEGER DEFAULT 1,
+            available INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -80,13 +109,15 @@ def init_database():
     cursor.execute('''
         CREATE TABLE transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_id TEXT NOT NULL,
+            transaction_id TEXT UNIQUE NOT NULL,
+            student_id INTEGER NOT NULL,
+            student_registration_no TEXT NOT NULL,
             book_id INTEGER NOT NULL,
             borrow_date TIMESTAMP NOT NULL,
             due_date TIMESTAMP NOT NULL,
             return_date TIMESTAMP,
-            status TEXT NOT NULL,
-            fine_amount REAL DEFAULT 0.0,
+            status TEXT DEFAULT 'borrowed',
+            fine_amount REAL DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (student_id) REFERENCES students(id),
             FOREIGN KEY (book_id) REFERENCES books(id)
@@ -100,54 +131,58 @@ def init_database():
     cursor.execute('''
         INSERT INTO admins (username, password, name, role)
         VALUES (?, ?, ?, ?)
-    ''', ('admin', admin_password, 'Admin User', 'admin'))
+    ''', ('admin', admin_password, 'System Administrator', 'admin'))
     
     cursor.execute('''
         INSERT INTO admins (username, password, name, role)
         VALUES (?, ?, ?, ?)
-    ''', ('librarian', librarian_password, 'Librarian', 'admin'))
+    ''', ('librarian', librarian_password, 'Library Staff', 'admin'))
     
-    # Insert default students
+    # Insert default students with 8-digit registration numbers
+    default_students = [
+        ('Rahul Kumar', 'rahul.kumar', 'pass123', 'rahul.kumar@college.edu', '9876543210'),
+        ('Priya Sharma', 'priya.sharma', 'pass123', 'priya.sharma@college.edu', '9876543211'),
+        ('Amit Patel', 'amit.patel', 'pass123', 'amit.patel@college.edu', '9876543212'),
+    ]
+    
     student_password = hash_password('pass123')
     
-    students_data = [
-        ('S001', 'student1', student_password, 'Rahul Kumar', 'rahul@example.com', '9876543210'),
-        ('S002', 'student2', student_password, 'Priya Sharma', 'priya@example.com', '9876543211'),
-        ('S003', 'student3', student_password, 'Amit Patel', 'amit@example.com', '9876543212')
-    ]
-    
-    for student in students_data:
+    for name, username, _, email, phone in default_students:
+        reg_no = generate_registration_number()
         cursor.execute('''
-            INSERT INTO students (id, username, password, name, email, phone)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', student)
+            INSERT INTO students (registration_no, username, password, name, email, phone, role)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (reg_no, username, student_password, name, email, phone, 'student'))
     
     # Insert default books
-    books_data = [
-        ("The Lord of the Rings", "J.R.R. Tolkien", "9780618053267", 1178, 25.50, "Fantasy", 5, 5),
-        ("The Hobbit", "J.R.R. Tolkien", "9780345339683", 310, 15.00, "Fantasy", 8, 8),
-        ("Pride and Prejudice", "Jane Austen", "9780141439518", 279, 12.75, "Romance", 3, 3),
-        ("1984", "George Orwell", "9780451524935", 328, 10.20, "Fiction", 4, 4),
-        ("To Kill a Mockingbird", "Harper Lee", "9780061120084", 324, 14.99, "Fiction", 6, 6),
-        ("The C Programming Language", "Dennis Ritchie", "9780131101630", 272, 45.00, "Programming", 10, 10),
-        ("Clean Code", "Robert C. Martin", "9780132350884", 464, 38.50, "Programming", 7, 7),
-        ("Harry Potter and the Philosopher's Stone", "J.K. Rowling", "9780747532699", 223, 20.00, "Fantasy", 12, 12)
+    default_books = [
+        ('Harry Potter and the Philosopher\'s Stone', 'J.K. Rowling', '9780439708180', 309, 12.99, 'Fantasy', 5, 5),
+        ('The Hobbit', 'J.R.R. Tolkien', '9780547928227', 310, 10.99, 'Fantasy', 3, 3),
+        ('1984', 'George Orwell', '9780451524935', 328, 9.99, 'Fiction', 4, 4),
+        ('To Kill a Mockingbird', 'Harper Lee', '9780061120084', 324, 11.99, 'Fiction', 6, 6),
+        ('Pride and Prejudice', 'Jane Austen', '9780141439518', 279, 8.99, 'Romance', 4, 4),
+        ('The Great Gatsby', 'F. Scott Fitzgerald', '9780743273565', 180, 10.50, 'Fiction', 5, 5),
     ]
     
-    for book in books_data:
-        cursor.execute('''
-            INSERT INTO books (title, author, isbn, pages, price, category, quantity, available)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', book)
+    cursor.executemany('''
+        INSERT INTO books (title, author, isbn, pages, price, category, quantity, available)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', default_books)
     
     conn.commit()
     conn.close()
     
-    print("✅ Database initialized successfully!")
-    print(f"📁 Database file: {DATABASE_NAME}")
-    print("\n🔐 Default Login Credentials:")
-    print("Admin: username='admin', password='admin123'")
-    print("Student: username='student1', password='pass123'")
+    print('✅ Database initialized successfully!')
+    print('🔐 Default Admin Credentials:')
+    print("   Admin: username='admin', password='admin123'")
+    print("   Librarian: username='librarian', password='lib@2025'")
+    print('👥 Default Students:')
+    print("   All students have password='pass123'")
+    print('📚 6 default books added')
 
 if __name__ == '__main__':
+    if os.path.exists(DATABASE_NAME):
+        os.remove(DATABASE_NAME)
+        print(f'🗑️  Deleted existing database: {DATABASE_NAME}')
+    
     init_database()

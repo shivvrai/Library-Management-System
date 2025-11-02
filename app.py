@@ -1,5 +1,5 @@
 # app.py - Flask Backend with SQLite Database Integration
-
+import random
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, jwt_required, create_access_token, get_jwt_identity
@@ -384,6 +384,62 @@ def admin_get_overdue():
     except Exception as e:
         return jsonify({'error': 'Failed to fetch overdue books', 'details': str(e)}), 500
 
+@app.route('/api/admin/books/<int:book_id>/quantity', methods=['PATCH'])
+@role_required('admin')
+def admin_update_book_quantity(book_id):
+    """Increment or decrement book quantity"""
+    try:
+        data = request.get_json()
+        action = data.get('action')  # 'increment' or 'decrement'
+        amount = int(data.get('amount', 1))
+        
+        if action not in ['increment', 'decrement']:
+            return jsonify({'error': 'Invalid action. Use "increment" or "decrement"'}), 400
+        
+        conn = get_db_connection()
+        
+        # Get current book
+        book = conn.execute('SELECT * FROM books WHERE id = ?', (book_id,)).fetchone()
+        if not book:
+            conn.close()
+            return jsonify({'error': 'Book not found'}), 404
+        
+        current_qty = book['quantity']
+        current_available = book['available']
+        
+        if action == 'increment':
+            new_qty = current_qty + amount
+            new_available = current_available + amount
+        else:  # decrement
+            if amount > current_available:
+                conn.close()
+                return jsonify({'error': f'Cannot decrement. Only {current_available} copies available.'}), 400
+            new_qty = current_qty - amount
+            new_available = current_available - amount
+        
+        # Update quantities
+        conn.execute('''
+            UPDATE books
+            SET quantity = ?, available = ?
+            WHERE id = ?
+        ''', (new_qty, new_available, book_id))
+        
+        conn.commit()
+        
+        # Get updated book
+        updated_book = conn.execute('SELECT * FROM books WHERE id = ?', (book_id,)).fetchone()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Quantity {action}ed by {amount}',
+            'book': row_to_dict(updated_book)
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'error': 'Failed to update quantity', 'details': str(e)}), 500
+
+
 @app.route('/api/admin/return/<int:transaction_id>', methods=['POST'])
 @role_required('admin')
 def admin_process_return(transaction_id):
@@ -475,6 +531,7 @@ def admin_get_stats():
     except Exception as e:
         return jsonify({'error': 'Failed to get stats', 'details': str(e)}), 500
 
+
 # ==================== Student Routes ====================
 
 @app.route('/api/student/books/available', methods=['GET'])
@@ -487,13 +544,14 @@ def student_get_available_books():
         return jsonify(rows_to_dict_list(books)), 200
     except Exception as e:
         return jsonify({'error': 'Failed to fetch books', 'details': str(e)}), 500
-
 @app.route('/api/student/borrow', methods=['POST'])
 @jwt_required()
 def student_borrow_book():
     try:
-        identity = get_jwt_identity()  # This is the username string
-        claims = get_jwt()  # Get the full JWT payload
+        from database import get_next_transaction_id
+        
+        identity = get_jwt_identity()
+        claims = get_jwt()
         student_id = claims.get('id')
         
         data = request.get_json()
@@ -533,7 +591,7 @@ def student_borrow_book():
             conn.close()
             return jsonify({'error': f'Cannot borrow. Please pay pending fine of ₹{student["fine_amount"]}'}), 400
         
-        # ✅ NEW: Check if student already has this specific book borrowed
+        # Check if student already has this book borrowed
         already_borrowed = conn.execute('''
             SELECT id FROM transactions
             WHERE student_id = ? AND book_id = ? AND status = ?
@@ -541,16 +599,30 @@ def student_borrow_book():
         
         if already_borrowed:
             conn.close()
-            return jsonify({'error': f'You already have this book borrowed. Please return it before borrowing again.'}), 400
+            return jsonify({'error': 'You already have this book borrowed. Please return it before borrowing again.'}), 400
+        
+        # Generate transaction ID
+        transaction_id = get_next_transaction_id()
         
         # Create transaction
         borrow_date = datetime.now()
         due_date = borrow_date + timedelta(days=RETURN_DAYS)
         
         cursor = conn.execute('''
-            INSERT INTO transactions (student_id, book_id, borrow_date, due_date, status)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (student_id, book_id, borrow_date.isoformat(), due_date.isoformat(), 'borrowed'))
+            INSERT INTO transactions (
+                transaction_id, student_id, student_registration_no, 
+                book_id, borrow_date, due_date, status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            transaction_id,
+            student_id,
+            student['registration_no'],
+            book_id,
+            borrow_date.isoformat(),
+            due_date.isoformat(),
+            'borrowed'
+        ))
         
         # Update book availability
         conn.execute('UPDATE books SET available = available - 1 WHERE id = ?', (book_id,))
@@ -568,6 +640,7 @@ def student_borrow_book():
             'success': True,
             'message': 'Book borrowed successfully',
             'transaction': row_to_dict(transaction),
+            'transaction_id': transaction_id,
             'due_date': due_date.strftime('%Y-%m-%d')
         }), 201
         
@@ -744,6 +817,380 @@ def not_found(error):
 @app.errorhandler(500)
 def internal_error(error):
     return jsonify({'error': 'Internal server error'}), 500
+
+# ==================== Book Search Routes ====================
+
+@app.route('/api/admin/books/search', methods=['GET'])
+@role_required('admin')
+def admin_search_books():
+    """Search books by title, author, ISBN, or category"""
+    try:
+        query = request.args.get('q', '').strip()
+        
+        conn = get_db_connection()
+        
+        if query:
+            books = conn.execute('''
+                SELECT * FROM books
+                WHERE title LIKE ? OR author LIKE ? OR isbn LIKE ? OR category LIKE ?
+                ORDER BY title ASC
+            ''', (f'%{query}%', f'%{query}%', f'%{query}%', f'%{query}%')).fetchall()
+        else:
+            books = conn.execute('SELECT * FROM books ORDER BY title ASC').fetchall()
+        
+        conn.close()
+        return jsonify(rows_to_dict_list(books)), 200
+        
+    except Exception as e:
+        return jsonify({'error': 'Failed to search books', 'details': str(e)}), 500
+
+
+@app.route('/api/student/books/search', methods=['GET'])
+@jwt_required()
+def student_search_books():
+    """Search available books by title, author, ISBN, or category"""
+    try:
+        query = request.args.get('q', '').strip()
+        
+        conn = get_db_connection()
+        
+        if query:
+            books = conn.execute('''
+                SELECT * FROM books
+                WHERE available > 0 AND (title LIKE ? OR author LIKE ? OR isbn LIKE ? OR category LIKE ?)
+                ORDER BY title ASC
+            ''', (f'%{query}%', f'%{query}%', f'%{query}%', f'%{query}%')).fetchall()
+        else:
+            books = conn.execute('SELECT * FROM books WHERE available > 0 ORDER BY title ASC').fetchall()
+        
+        conn.close()
+        return jsonify(rows_to_dict_list(books)), 200
+        
+    except Exception as e:
+        return jsonify({'error': 'Failed to search books', 'details': str(e)}), 500
+
+
+# ==================== Student Registration Routes ====================
+
+@app.route('/api/auth/register', methods=['POST'])
+def register_student():
+    """Self-registration for students"""
+    try:
+        from database import generate_registration_number
+        
+        data = request.get_json()
+        
+        # Validate required fields
+        required_fields = ['name', 'username', 'password', 'email', 'phone']
+        for field in required_fields:
+            if not data.get(field):
+                return jsonify({'error': f'{field} is required'}), 400
+        
+        conn = get_db_connection()
+        
+        # Check for duplicate username
+        existing = conn.execute('SELECT id FROM students WHERE username = ?', (data['username'],)).fetchone()
+        if existing:
+            conn.close()
+            return jsonify({'error': 'Username already exists'}), 400
+        
+        # Check for duplicate email
+        existing_email = conn.execute('SELECT id FROM students WHERE email = ?', (data['email'],)).fetchone()
+        if existing_email:
+            conn.close()
+            return jsonify({'error': 'Email already registered'}), 400
+        
+        # Generate registration number
+        reg_no = generate_registration_number()
+        
+        # Hash password
+        hashed_pw = hash_password(data['password'])
+        
+        # Insert student
+        cursor = conn.execute('''
+            INSERT INTO students (registration_no, username, password, name, email, phone, role)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            reg_no,
+            data['username'],
+            hashed_pw,
+            data['name'],
+            data['email'],
+            data['phone'],
+            'student'
+        ))
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Registration successful! You can now login.',
+            'registration_no': reg_no
+        }), 201
+        
+    except Exception as e:
+        return jsonify({'error': 'Registration failed', 'details': str(e)}), 500
+
+
+@app.route('/api/auth/check-username', methods=['GET'])
+def check_username():
+    """Check if username is available"""
+    try:
+        username = request.args.get('username', '').strip()
+        
+        if not username:
+            return jsonify({'available': False, 'error': 'Username is required'}), 400
+        
+        if len(username) < 3:
+            return jsonify({'available': False, 'error': 'Username must be at least 3 characters'}), 400
+        
+        conn = get_db_connection()
+        
+        # Check in both students and admins
+        student = conn.execute('SELECT id FROM students WHERE username = ?', (username,)).fetchone()
+        admin = conn.execute('SELECT id FROM admins WHERE username = ?', (username,)).fetchone()
+        
+        conn.close()
+        
+        if student or admin:
+            return jsonify({'available': False, 'message': 'Username is already taken'}), 200
+        
+        return jsonify({'available': True, 'message': 'Username is available'}), 200
+        
+    except Exception as e:
+        return jsonify({'error': 'Failed to check username', 'details': str(e)}), 500
+
+
+@app.route('/api/auth/suggest-usernames', methods=['GET'])
+def suggest_usernames():
+    """Generate 3 username suggestions based on name"""
+    try:
+        name = request.args.get('name', '').strip()
+        
+        if not name:
+            return jsonify({'suggestions': []}), 200
+        
+        # Generate suggestions
+        parts = name.lower().split()
+        suggestions = []
+        
+        if len(parts) >= 2:
+            # Format: firstname.lastname
+            suggestions.append(f"{parts[0]}.{parts[-1]}")
+            # Format: firstinitial + lastname
+            suggestions.append(f"{parts[0][0]}{parts[-1]}")
+            # Format: firstname + lastinitial
+            suggestions.append(f"{parts[0]}{parts[-1][0]}")
+        elif len(parts) == 1:
+            # Single name - add numbers
+            suggestions.append(f"{parts[0]}123")
+            suggestions.append(f"{parts[0]}_{random.randint(100, 999)}")
+            suggestions.append(f"{parts[0]}{random.randint(10, 99)}")
+        
+        # Check which suggestions are available
+        conn = get_db_connection()
+        available_suggestions = []
+        
+        for suggestion in suggestions:
+            student = conn.execute('SELECT id FROM students WHERE username = ?', (suggestion,)).fetchone()
+            admin = conn.execute('SELECT id FROM admins WHERE username = ?', (suggestion,)).fetchone()
+            
+            if not student and not admin:
+                available_suggestions.append(suggestion)
+        
+        conn.close()
+        
+        # If all taken, add random numbers
+        while len(available_suggestions) < 3:
+            random_suggestion = f"{parts[0]}{random.randint(1000, 9999)}"
+            if random_suggestion not in available_suggestions:
+                available_suggestions.append(random_suggestion)
+        
+        return jsonify({'suggestions': available_suggestions[:3]}), 200
+        
+    except Exception as e:
+        return jsonify({'error': 'Failed to generate suggestions', 'details': str(e)}), 500
+
+
+# ==================== Student Management Routes (Admin) ====================
+
+@app.route('/api/admin/students', methods=['POST'])
+@role_required('admin')
+def admin_add_student():
+    """Add new student"""
+    try:
+        from database import generate_registration_number
+        
+        data = request.get_json()
+        
+        # Validate required fields
+        required_fields = ['username', 'password', 'name', 'email', 'phone']
+        for field in required_fields:
+            if not data.get(field):
+                return jsonify({'error': f'{field} is required'}), 400
+        
+        conn = get_db_connection()
+        
+        # Check for duplicate username
+        existing = conn.execute('SELECT id FROM students WHERE username = ?', (data['username'],)).fetchone()
+        if existing:
+            conn.close()
+            return jsonify({'error': 'Username already exists'}), 400
+        
+        # Generate registration number
+        reg_no = generate_registration_number()
+        
+        # Hash password
+        hashed_pw = hash_password(data['password'])
+        
+        # Insert student
+        cursor = conn.execute('''
+            INSERT INTO students (registration_no, username, password, name, email, phone, role)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            reg_no,
+            data['username'],
+            hashed_pw,
+            data['name'],
+            data['email'],
+            data['phone'],
+            'student'
+        ))
+        
+        conn.commit()
+        
+        # Get created student
+        new_student = conn.execute('SELECT * FROM students WHERE id = ?', (cursor.lastrowid,)).fetchone()
+        conn.close()
+        
+        student_dict = row_to_dict(new_student)
+        student_dict.pop('password', None)
+        
+        return jsonify({'success': True, 'student': student_dict}), 201
+        
+    except Exception as e:
+        return jsonify({'error': 'Failed to add student', 'details': str(e)}), 500
+
+
+@app.route('/api/admin/students/<int:student_id>', methods=['PUT'])
+@role_required('admin')
+def admin_update_student(student_id):
+    """Update student details (NOT registration_no)"""
+    try:
+        data = request.get_json()
+        conn = get_db_connection()
+        
+        # Check if student exists
+        student = conn.execute('SELECT * FROM students WHERE id = ?', (student_id,)).fetchone()
+        if not student:
+            conn.close()
+            return jsonify({'error': 'Student not found'}), 404
+        
+        # Build update query (registration_no CANNOT be updated)
+        update_fields = []
+        update_values = []
+        
+        if 'name' in data:
+            update_fields.append('name = ?')
+            update_values.append(data['name'])
+        
+        if 'email' in data:
+            update_fields.append('email = ?')
+            update_values.append(data['email'])
+        
+        if 'phone' in data:
+            update_fields.append('phone = ?')
+            update_values.append(data['phone'])
+        
+        if 'password' in data and data['password']:
+            update_fields.append('password = ?')
+            update_values.append(hash_password(data['password']))
+        
+        if update_fields:
+            update_values.append(student_id)
+            query = f"UPDATE students SET {', '.join(update_fields)} WHERE id = ?"
+            conn.execute(query, update_values)
+            conn.commit()
+        
+        # Get updated student
+        updated_student = conn.execute('SELECT * FROM students WHERE id = ?', (student_id,)).fetchone()
+        conn.close()
+        
+        student_dict = row_to_dict(updated_student)
+        student_dict.pop('password', None)
+        
+        return jsonify({'success': True, 'student': student_dict}), 200
+        
+    except Exception as e:
+        return jsonify({'error': 'Failed to update student', 'details': str(e)}), 500
+
+
+@app.route('/api/admin/students/<int:student_id>', methods=['DELETE'])
+@role_required('admin')
+def admin_delete_student(student_id):
+    """Delete student (including default students)"""
+    try:
+        conn = get_db_connection()
+        
+        # Check if student exists
+        student = conn.execute('SELECT * FROM students WHERE id = ?', (student_id,)).fetchone()
+        if not student:
+            conn.close()
+            return jsonify({'error': 'Student not found'}), 404
+        
+        # Check if student has borrowed books
+        borrowed = conn.execute(
+            'SELECT id FROM transactions WHERE student_id = ? AND status = ?',
+            (student_id, 'borrowed')
+        ).fetchone()
+        
+        if borrowed:
+            conn.close()
+            return jsonify({'error': 'Cannot delete student with borrowed books. Ask them to return books first.'}), 400
+        
+        # Delete student
+        conn.execute('DELETE FROM students WHERE id = ?', (student_id,))
+        conn.commit()
+        conn.close()
+        
+        return jsonify({'success': True, 'message': 'Student deleted successfully'}), 200
+        
+    except Exception as e:
+        return jsonify({'error': 'Failed to delete student', 'details': str(e)}), 500
+
+
+@app.route('/api/admin/students/search', methods=['GET'])
+@role_required('admin')
+def admin_search_students():
+    """Search students by name, registration number, or username"""
+    try:
+        query = request.args.get('q', '').strip()
+        
+        conn = get_db_connection()
+        
+        if query:
+            students = conn.execute('''
+                SELECT * FROM students
+                WHERE name LIKE ? OR registration_no LIKE ? OR username LIKE ? OR email LIKE ?
+                ORDER BY created_at DESC
+            ''', (f'%{query}%', f'%{query}%', f'%{query}%', f'%{query}%')).fetchall()
+        else:
+            students = conn.execute('SELECT * FROM students ORDER BY created_at DESC').fetchall()
+        
+        conn.close()
+        
+        student_list = []
+        for student in students:
+            student_dict = row_to_dict(student)
+            student_dict.pop('password', None)
+            student_list.append(student_dict)
+        
+        return jsonify(student_list), 200
+        
+    except Exception as e:
+        return jsonify({'error': 'Failed to search students', 'details': str(e)}), 500
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

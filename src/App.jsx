@@ -1,60 +1,60 @@
 import { useState, useEffect } from 'react'
-import './App.css'
+import { getToken, logout } from './utils/auth'
 import Login from './components/Login'
 import AdminDashboard from './components/admin/AdminDashboard'
 import StudentDashboard from './components/student/StudentDashboard'
+import './App.css'
 
 function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false)
-  const [userRole, setUserRole] = useState(null)
+  const [user, setUser] = useState(null)
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    // Check localStorage directly - no async needed
-    const token = localStorage.getItem('token')
-    const userStr = localStorage.getItem('user')
+    // Check if user is already logged in
+    const token = getToken()
+    const storedUser = localStorage.getItem('user')
     
-    if (token && userStr) {
+    if (token && storedUser) {
       try {
-        const user = JSON.parse(userStr)
-        setUserRole(user.role)
-        setIsAuthenticated(true)
-      } catch (error) {
-        console.error('Failed to parse user data:', error)
-        localStorage.clear()
+        setUser(JSON.parse(storedUser))
+      } catch (err) {
+        logout()
       }
     }
+    
+    setLoading(false)
   }, [])
 
-  const handleLogin = () => {
-    const userStr = localStorage.getItem('user')
-    if (userStr) {
-      try {
-        const user = JSON.parse(userStr)
-        setUserRole(user.role)
-        setIsAuthenticated(true)
-      } catch (error) {
-        console.error('Failed to parse user data:', error)
-      }
-    }
+  const handleLoginSuccess = (userData) => {
+    setUser(userData)
   }
 
   const handleLogout = () => {
-    localStorage.removeItem('token')
-    localStorage.removeItem('user')
-    setIsAuthenticated(false)
-    setUserRole(null)
+    logout()
+    setUser(null)
+  }
+
+  if (loading) {
+    return (
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
+        <div>Loading...</div>
+      </div>
+    )
+  }
+
+  if (!user) {
+    return <Login onLoginSuccess={handleLoginSuccess} />
   }
 
   return (
-    <div className="app">
-      {!isAuthenticated ? (
-        <Login onLogin={handleLogin} />
-      ) : userRole === 'admin' ? (
-        <AdminDashboard onLogout={handleLogout} />
-      ) : userRole === 'student' ? (
-        <StudentDashboard onLogout={handleLogout} />
-      ) : null}
-    </div>
+    <>
+      {user.role === 'admin' && (
+        <AdminDashboard user={user} onLogout={handleLogout} />
+      )}
+      {user.role === 'student' && (
+        <StudentDashboard user={user} onLogout={handleLogout} />
+      )}
+    </>
   )
 }
 

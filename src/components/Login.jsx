@@ -1,97 +1,108 @@
 import { useState } from 'react'
-import { login } from '../utils/auth'
-import '../App.css'
+import { authAPI } from '../utils/api'
+import StudentRegister from './StudentRegister'
+import './Login.css'
 
-export default function Login({ onLogin }) {
-  const [credentials, setCredentials] = useState({
-    username: '',
-    password: ''
-  })
+const Login = ({ onLoginSuccess }) => {
+  const [showRegister, setShowRegister] = useState(false)
+  const [credentials, setCredentials] = useState({ username: '', password: '' })
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
-  const handleSubmit = async (e) => {
-    e.preventDefault()
+  const handleInputChange = (e) => {
+    const { name, value } = e.target
+    setCredentials(prev => ({ ...prev, [name]: value }))
     setError('')
-    setLoading(true)
+  }
 
+  const handleLogin = async (e) => {
+    e.preventDefault()
+    
+    if (!credentials.username || !credentials.password) {
+      setError('Username and password are required')
+      return
+    }
+
+    setLoading(true)
     try {
-      const success = await login(credentials.username, credentials.password)
-      if (success) {
-        if (onLogin) onLogin()
-      } else {
-        setError('Invalid username or password')
-      }
+      const response = await authAPI.login(credentials)
+      
+      // Store token
+      localStorage.setItem('token', response.token)
+      localStorage.setItem('user', JSON.stringify(response.user))
+      
+      onLoginSuccess(response.user)
     } catch (err) {
-      setError('Login failed. Please try again.')
-      console.error('Login error:', err)
+      setError(err.message || 'Login failed')
     } finally {
       setLoading(false)
     }
   }
 
-  const handleChange = (e) => {
-    setCredentials({
-      ...credentials,
-      [e.target.name]: e.target.value
-    })
+  if (showRegister) {
+    return <StudentRegister onSuccess={() => {
+      setShowRegister(false)
+      setCredentials({ username: '', password: '' })
+    }} onBackToLogin={() => setShowRegister(false)} />
   }
 
   return (
     <div className="login-container">
       <div className="login-card">
-        <h1>📚 Library Management System</h1>
-        <p className="login-subtitle">Sign in to continue</p>
+        <div className="login-header">
+          <h1>📚 Library System</h1>
+          <p>Student & Admin Portal</p>
+        </div>
 
-        <form onSubmit={handleSubmit} className="login-form">
-          {error && (
-            <div className="error-message">
-              {error}
-            </div>
-          )}
+        {error && <div className="error-message">{error}</div>}
 
+        <form onSubmit={handleLogin}>
           <div className="form-group">
-            <label htmlFor="username">Username</label>
+            <label>Username</label>
             <input
               type="text"
-              id="username"
               name="username"
               value={credentials.username}
-              onChange={handleChange}
+              onChange={handleInputChange}
               placeholder="Enter username"
-              required
-              autoFocus
+              disabled={loading}
             />
           </div>
 
           <div className="form-group">
-            <label htmlFor="password">Password</label>
+            <label>Password</label>
             <input
               type="password"
-              id="password"
               name="password"
               value={credentials.password}
-              onChange={handleChange}
+              onChange={handleInputChange}
               placeholder="Enter password"
-              required
+              disabled={loading}
             />
           </div>
 
-          <button 
-            type="submit" 
-            className="btn btn-primary btn-block"
-            disabled={loading}
-          >
-            {loading ? 'Signing in...' : 'Sign In'}
+          <button type="submit" disabled={loading} className="btn btn-primary btn-login">
+            {loading ? 'Logging in...' : '🔓 Login'}
           </button>
         </form>
 
-        <div className="login-help">
+        <div className="divider">OR</div>
+
+        <button 
+          onClick={() => setShowRegister(true)} 
+          className="btn btn-secondary btn-register"
+        >
+          📝 Create Student Account
+        </button>
+
+        <div className="login-footer">
           <p><strong>Demo Credentials:</strong></p>
-          <p>Admin: admin / admin123</p>
-          <p>Student: student1 / pass123</p>
+          <p><small>Admin: admin / admin123</small></p>
+          <p><small>Student: rahul.kumar / pass123</small></p>
         </div>
       </div>
     </div>
   )
 }
+
+export default Login

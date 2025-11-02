@@ -1,129 +1,114 @@
 import { useState, useEffect } from 'react'
 import { adminAPI } from '../../utils/api'
-import { logout } from '../../utils/auth'
 import BookManager from './BookManager'
-import StudentManager from './StudentManager'
+import StudentManagement from './StudentManagement'
 import TransactionHistory from './TransactionHistory'
 import OverdueBooks from './OverdueBooks'
 import './AdminDashboard.css'
 
-export default function AdminDashboard({ onLogout }) {
-  const [activeTab, setActiveTab] = useState('overview')
-  const [stats, setStats] = useState({})
-  const [loading, setLoading] = useState(true)
+const AdminDashboard = ({ onLogout }) => {
+  const [activeTab, setActiveTab] = useState('books')
+  const [stats, setStats] = useState(null)
+  const [books, setBooks] = useState([])
+  const [students, setStudents] = useState([])
+  const [transactions, setTransactions] = useState([])
+  const [overdueBooks, setOverdueBooks] = useState([])
 
   useEffect(() => {
-    loadStats()
+    loadData()
   }, [])
 
-  const loadStats = async () => {
+  const loadData = async () => {
     try {
-      setLoading(true)
-      const data = await adminAPI.getStats()
-      setStats(data)
-    } catch (error) {
-      console.error('Failed to load stats:', error)
-    } finally {
-      setLoading(false)
+      const [statsData, booksData, studentsData, transactionsData, overdueData] = await Promise.all([
+        adminAPI.getStats(),
+        adminAPI.getBooks(),
+        adminAPI.getStudents(),
+        adminAPI.getTransactions(),
+        adminAPI.getOverdue()
+      ])
+      
+      setStats(statsData)
+      setBooks(booksData)
+      setStudents(studentsData)
+      setTransactions(transactionsData)
+      setOverdueBooks(overdueData)
+    } catch (err) {
+      console.error('Failed to load data:', err)
     }
   }
 
-  const handleLogout = () => {
-    logout()
-    if (onLogout) onLogout()
-  }
-
   return (
-    <div className="dashboard">
-      <header className="dashboard-header">
+    <div className="admin-dashboard">
+      <div className="dashboard-header">
         <h1>📚 Admin Dashboard</h1>
-        <button className="btn btn-secondary" onClick={handleLogout}>
-          Logout
-        </button>
-      </header>
+        <button onClick={onLogout} className="btn btn-secondary">Logout</button>
+      </div>
 
-      <nav className="dashboard-nav">
+      {stats && (
+        <div className="stats-grid">
+          <div className="stat-card">
+            <h3>{stats.total_books}</h3>
+            <p>Total Books</p>
+          </div>
+          <div className="stat-card">
+            <h3>{stats.total_students}</h3>
+            <p>Total Students</p>
+          </div>
+          <div className="stat-card">
+            <h3>{stats.active_borrows}</h3>
+            <p>Active Borrows</p>
+          </div>
+          <div className="stat-card">
+            <h3>{stats.overdue_books}</h3>
+            <p>Overdue Books</p>
+          </div>
+          <div className="stat-card">
+            <h3>₹{stats.total_fines}</h3>
+            <p>Total Fines</p>
+          </div>
+          <div className="stat-card">
+            <h3>{stats.total_transactions}</h3>
+            <p>Total Transactions</p>
+          </div>
+        </div>
+      )}
+
+      <div className="tabs">
         <button 
-          className={`nav-btn ${activeTab === 'overview' ? 'active' : ''}`}
-          onClick={() => setActiveTab('overview')}
-        >
-          Overview
-        </button>
-        <button 
-          className={`nav-btn ${activeTab === 'books' ? 'active' : ''}`}
+          className={activeTab === 'books' ? 'tab active' : 'tab'}
           onClick={() => setActiveTab('books')}
         >
-          Books
+          📚 Books
         </button>
         <button 
-          className={`nav-btn ${activeTab === 'students' ? 'active' : ''}`}
+          className={activeTab === 'students' ? 'tab active' : 'tab'}
           onClick={() => setActiveTab('students')}
         >
-          Students
+          👥 Students
         </button>
         <button 
-          className={`nav-btn ${activeTab === 'transactions' ? 'active' : ''}`}
+          className={activeTab === 'transactions' ? 'tab active' : 'tab'}
           onClick={() => setActiveTab('transactions')}
         >
-          Transactions
+          📋 Transactions
         </button>
         <button 
-          className={`nav-btn ${activeTab === 'overdue' ? 'active' : ''}`}
+          className={activeTab === 'overdue' ? 'tab active' : 'tab'}
           onClick={() => setActiveTab('overdue')}
         >
-          Overdue
+          ⚠️ Overdue
         </button>
-      </nav>
+      </div>
 
-      <main className="dashboard-content">
-        {activeTab === 'overview' && (
-          <div className="overview-section">
-            <h2>Library Statistics</h2>
-            {loading ? (
-              <div className="loading">Loading statistics...</div>
-            ) : (
-              <div className="stats-grid">
-                <div className="stat-card">
-                  <h3>Total Books</h3>
-                  <p className="stat-value">{stats.total_books || 0}</p>
-                </div>
-                <div className="stat-card">
-                  <h3>Total Students</h3>
-                  <p className="stat-value">{stats.total_students || 0}</p>
-                </div>
-                <div className="stat-card">
-                  <h3>Active Borrows</h3>
-                  <p className="stat-value">{stats.active_borrows || 0}</p>
-                </div>
-                <div className="stat-card">
-                  <h3>Overdue Books</h3>
-                  <p className="stat-value">{stats.overdue_books || 0}</p>
-                </div>
-                <div className="stat-card">
-                  <h3>Total Fines</h3>
-                  <p className="stat-value">₹{stats.total_fines || 0}</p>
-                </div>
-                <div className="stat-card">
-                  <h3>Total Transactions</h3>
-                  <p className="stat-value">{stats.total_transactions || 0}</p>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {activeTab === 'books' && (
-          <BookManager books={[]} onDataChanged={loadStats} />
-        )}
-
-        {activeTab === 'students' && (
-          <StudentManager students={[]} />
-        )}
-
-        {activeTab === 'transactions' && <TransactionHistory />}
-
-        {activeTab === 'overdue' && <OverdueBooks />}
-      </main>
+      <div className="tab-content">
+        {activeTab === 'books' && <BookManager books={books} onDataChanged={loadData} />}
+        {activeTab === 'students' && <StudentManagement />}
+        {activeTab === 'transactions' && <TransactionHistory transactions={transactions} onDataChanged={loadData} />}
+        {activeTab === 'overdue' && <OverdueBooks overdueBooks={overdueBooks} onDataChanged={loadData} />}
+      </div>
     </div>
   )
 }
+
+export default AdminDashboard
