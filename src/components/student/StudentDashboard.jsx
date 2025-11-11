@@ -22,7 +22,7 @@ const StudentDashboard = ({ onLogout }) => {
     try {
       setLoading(true)
       const [books, borrowed, fineData] = await Promise.all([
-        studentAPI.getAvailableBooks(),
+        studentAPI.getBooks(),
         studentAPI.getMyBooks(),
         studentAPI.getFines()
       ])

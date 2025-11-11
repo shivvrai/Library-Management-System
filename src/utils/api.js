@@ -1,263 +1,102 @@
-// src/utils/api.js - Complete API Configuration
-
+// src/utils/api.js
 import { getToken } from './auth';
 
-// API Base URL - Already has your Render URL!
-const API_BASE = import.meta.env.VITE_API_URL || 'https://library-management-system-aahl.onrender.com/api';
+/**
+ * Development: use Vite proxy '/api' (forwarded to local backend)
+ * Production: use environment variable VITE_API_URL (set it when deploying)
+ */
+export const API_BASE = import.meta.env.DEV
+  ? '/api'
+  : (import.meta.env.VITE_API_URL || 'https://library-management-system-aahl.onrender.com/api');
 
-async function apiCall(endpoint, options = {}) {
-  const url = `${API_BASE}${endpoint}`;
+export async function apiCall(endpoint, options = {}) {
+  if (!endpoint || typeof endpoint !== 'string') throw new Error('apiCall: endpoint must be a string');
+
+  const path = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  const url = `${API_BASE}${path}`;
+
   const token = getToken();
-  
-  const config = {
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token && { 'Authorization': `Bearer ${token}` })
-    },
-    ...options
+
+  const providedHeaders = options.headers || {};
+  const headers = {
+    'Content-Type': 'application/json',
+    ...providedHeaders,
+    ...(token ? { Authorization: `Bearer ${token}` } : {})
   };
-  
-  console.log(`🔵 API Call: ${options.method || 'GET'} ${url}`);
-  
+
+  const config = {
+    method: options.method || 'GET',
+    headers,
+    ...(options.body !== undefined
+      ? { body: typeof options.body === 'string' ? options.body : JSON.stringify(options.body) }
+      : {}),
+    ...(['signal', 'credentials', 'mode', 'cache'].reduce((acc, key) => {
+      if (options[key] !== undefined) acc[key] = options[key];
+      return acc;
+    }, {}))
+  };
+
+  // Dev logging — OK for development; remove or guard for production
+  if (import.meta.env.DEV) {
+    console.log(`🔵 API Call: ${config.method} ${path}`, 'hasToken=', !!token);
+  }
+
   try {
-    const response = await fetch(url, config);
-    const data = await response.json();
-    
-    console.log(`📥 Response (${response.status}):`, data);
-    
-    if (!response.ok) {
-      const errorMsg = data.error || data.message || `API Error: ${response.status}`;
-      throw new Error(errorMsg);
+    const res = await fetch(url, config);
+    const text = await res.text();
+    const data = text ? JSON.parse(text) : null;
+
+    if (import.meta.env.DEV) {
+      console.log(`📥 Response (${res.status}):`, data);
     }
-    
+
+    if (!res.ok) {
+      const errMsg = (data && (data.error || data.message || data.detail)) || `API Error: ${res.status} ${res.statusText}`;
+      const err = new Error(errMsg);
+      err.status = res.status;
+      err.raw = data;
+      throw err;
+    }
+
     return data;
-  } catch (error) {
-    console.error('❌ API call failed:', error);
-    throw error;
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      throw new Error('Invalid JSON response from server');
+    }
+    throw err;
   }
 }
 
-// ==================== AUTH API ====================
-
+/* ===== authAPI ===== */
 export const authAPI = {
-  login: (credentials) => apiCall('/auth/login', {
-    method: 'POST',
-    body: JSON.stringify(credentials)
-  }),
-  
-  register: (studentData) => apiCall('/auth/register', {
-    method: 'POST',
-    body: JSON.stringify(studentData)
-  }),
-  
-  checkUsername: (username) => apiCall(`/auth/check-username/${username}`),
-  
-  suggestUsernames: (name) => apiCall(`/auth/suggest-usernames/${name}`)
+  login: (credentials) => apiCall('/auth/login', { method: 'POST', body: credentials }),
+  register: (payload) => apiCall('/auth/register', { method: 'POST', body: payload }),
+  checkUsername: (username) => apiCall(`/auth/check-username?username=${encodeURIComponent(username)}`)
 };
 
-// ==================== ADMIN API ====================
-
+/* ===== adminAPI ===== */
 export const adminAPI = {
   getBooks: () => apiCall('/admin/books'),
-  
-  addBook: (bookData) => apiCall('/admin/books', {
-    method: 'POST',
-    body: JSON.stringify(bookData)
-  }),
-  
-  updateBook: (id, book) => apiCall(`/admin/books/${id}`, {
-    method: 'PUT',
-    body: JSON.stringify(book)
-  }),
-  
-  deleteBook: (id) => apiCall(`/admin/books/${id}`, {
-    method: 'DELETE'
-  }),
-  
-  searchBooks: (query) => apiCall(`/admin/books/search?q=${encodeURIComponent(query || '')}`),
-  
+  addBook: (book) => apiCall('/admin/books', { method: 'POST', body: book }),
+  updateBook: (id, book) => apiCall(`/admin/books/${id}`, { method: 'PUT', body: book }),
+  deleteBook: (id) => apiCall(`/admin/books/${id}`, { method: 'DELETE' }),
   getStudents: () => apiCall('/admin/students'),
-  
-  addStudent: (studentData) => apiCall('/admin/students', {
-    method: 'POST',
-    body: JSON.stringify(studentData)
-  }),
-  
-  updateStudent: (id, studentData) => apiCall(`/admin/students/${id}`, {
-    method: 'PUT',
-    body: JSON.stringify(studentData)
-  }),
-  
-  deleteStudent: (id) => apiCall(`/admin/students/${id}`, {
-    method: 'DELETE'
-  }),
-  
-  searchStudents: (query) => apiCall(`/admin/students/search?q=${encodeURIComponent(query || '')}`),
-  
-   // Transactions & Stats
+  addStudent: (payload) => apiCall('/admin/students', { method: 'POST', body: payload }),
+  updateStudent: (id, payload) => apiCall(`/admin/students/${id}`, { method: 'PUT', body: payload }),
+  deleteStudent: (id) => apiCall(`/admin/students/${id}`, { method: 'DELETE' }),
   getTransactions: () => apiCall('/admin/transactions'),
-  
   getOverdue: () => apiCall('/admin/overdue'),
-  
-  processReturn: (transactionId) => apiCall(`/admin/return/${transactionId}`, {
-    method: 'POST'
-  }),
-  
-  // Dashboard Stats
+  processReturn: (transactionId) => apiCall(`/admin/return/${transactionId}`, { method: 'POST' }),
   getStats: () => apiCall('/admin/stats')
 };
 
-
-// ==================== STUDENT API ====================
-
+/* ===== studentAPI ===== */
 export const studentAPI = {
   getBooks: () => apiCall('/student/books'),
-  
-  searchBooks: (query) => apiCall(`/student/books/search?q=${encodeURIComponent(query || '')}`),
-  
-  borrowBook: (bookId) => apiCall('/student/borrow', {
-    method: 'POST',
-    body: JSON.stringify({ book_id: bookId })
-  }),
-  
   getMyBooks: () => apiCall('/student/my-books'),
-  
-  returnBook: (transactionId) => apiCall(`/student/return/${transactionId}`, {
-    method: 'POST'
-  }),
-  
-  getFines: () => apiCall('/student/fines')
+  getFines: () => apiCall('/student/fines'),
+  borrowBook: (bookId) => apiCall('/student/borrow', { method: 'POST', body: { book_id: bookId } }),
+  returnBook: (transactionId) => apiCall('/student/return', { method: 'POST', body: { transaction_id: transactionId } })
 };
 
-export const API_URL = API_BASE;
-export default API_BASE;
-
-
-
-// import { getToken } from './auth'
-
-// const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000/api'
-
-// async function apiCall(endpoint, options = {}) {
-//   const url = `${API_BASE}${endpoint}`
-//   const token = getToken()
-
-//   const config = {
-//     headers: {
-//       'Content-Type': 'application/json',
-//       ...(token && { 'Authorization': `Bearer ${token}` })
-//     },
-//     ...options
-//   }
-
-//   console.log(`🔵 API Call: ${options.method || 'GET'} ${url}`)
-
-//   try {
-//     const response = await fetch(url, config)
-//     const data = await response.json()
-    
-//     console.log(`📥 Response (${response.status}):`, data)
-    
-//     if (!response.ok) {
-//       const errorMsg = data.error || data.message || `API Error: ${response.status}`
-//       throw new Error(errorMsg)
-//     }
-    
-//     return data
-//   } catch (error) {
-//     console.error('❌ API call failed:', error)
-//     throw error
-//   }
-// }
-
-// // Auth API
-// export const authAPI = {
-//   login: (credentials) => apiCall('/auth/login', {
-//     method: 'POST',
-//     body: JSON.stringify(credentials)
-//   }),
-  
-//   register: (studentData) => apiCall('/auth/register', {
-//     method: 'POST',
-//     body: JSON.stringify(studentData)
-//   }),
-  
-//   checkUsername: (username) => apiCall(`/auth/check-username?username=${encodeURIComponent(username)}`),
-  
-//   suggestUsernames: (name) => apiCall(`/auth/suggest-usernames?name=${encodeURIComponent(name)}`)
-// }
-
-// // Admin API
-// export const adminAPI = {
-//   // Books Management
-//   getBooks: () => apiCall('/admin/books'),
-  
-//   addBook: (bookData) => apiCall('/admin/books', {
-//     method: 'POST',
-//     body: JSON.stringify(bookData)
-//   }),
-  
-//   updateBook: (id, book) => apiCall(`/admin/books/${id}`, {
-//     method: 'PUT',
-//     body: JSON.stringify(book)
-//   }),
-  
-//   deleteBook: (id) => apiCall(`/admin/books/${id}`, {
-//     method: 'DELETE'
-//   }),
-  
-//   updateQuantity: (id, action, amount = 1) => apiCall(`/admin/books/${id}/quantity`, {
-//     method: 'PATCH',
-//     body: JSON.stringify({ action, amount })
-//   }),
-  
-//   searchBooks: (query) => apiCall(`/admin/books/search?q=${encodeURIComponent(query || '')}`),
-  
-//   // Student Management
-//   getStudents: () => apiCall('/admin/students'),
-  
-//   addStudent: (studentData) => apiCall('/admin/students', {
-//     method: 'POST',
-//     body: JSON.stringify(studentData)
-//   }),
-  
-//   updateStudent: (id, studentData) => apiCall(`/admin/students/${id}`, {
-//     method: 'PUT',
-//     body: JSON.stringify(studentData)
-//   }),
-  
-//   deleteStudent: (id) => apiCall(`/admin/students/${id}`, {
-//     method: 'DELETE'
-//   }),
-  
-//   searchStudents: (query) => apiCall(`/admin/students/search?q=${encodeURIComponent(query || '')}`),
-  
-//   // Transactions & Stats
-//   getTransactions: () => apiCall('/admin/transactions'),
-//   getOverdue: () => apiCall('/admin/overdue'),
-//   processReturn: (transactionId) => apiCall(`/admin/return/${transactionId}`, {
-//     method: 'POST'
-//   }),
-//   getStats: () => apiCall('/admin/stats')
-// }
-
-// // Student API
-// export const studentAPI = {
-//   getAvailableBooks: () => apiCall('/student/books/available'),
-  
-//   searchBooks: (query) => apiCall(`/student/books/search?q=${encodeURIComponent(query || '')}`),
-  
-//   borrowBook: (bookId) => apiCall('/student/borrow', {
-//     method: 'POST',
-//     body: JSON.stringify({ book_id: bookId })
-//   }),
-  
-//   getMyBooks: () => apiCall('/student/my-books'),
-  
-//   returnBook: (transactionId) => apiCall(`/student/return/${transactionId}`, {
-//     method: 'POST'
-//   }),
-  
-//   getFines: () => apiCall('/student/fines')
-// }
-
+export default { apiCall, authAPI, adminAPI, studentAPI, API_BASE };
