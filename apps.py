@@ -815,6 +815,7 @@ async def student_get_my_books(claims = Depends(verify_student)):
         conn.close()
         return [
             {
+                "id": row["id"],
                 "transaction_id": row["transaction_id"],
                 "borrow_date": row["borrow_date"],
                 "due_date": row["due_date"],

@@ -1040,16 +1040,25 @@ button:focus-visible {
   box-shadow: var(--shadow-md);
 }
 
-.logout-btn {
-  background: var(--color-error);
-  color: var(--color-btn-primary-text);
-  padding: var(--space-8) var(--space-16);
-  font-size: var(--font-size-sm);
+.logout-btn, .dashboard-header .btn-secondary {
+  min-width: 80px;
+  min-height: 31px;
+  font-size: var(--font-size-base);
+  padding: 3px 16px;
+  background: var(--color-primary) !important;
+  color: var(--color-btn-primary-text) !important;
+  border-radius: var(--radius-base);
+  border: none;
+  box-shadow: var(--shadow-xs);
+  font-weight: 600;
+  margin: 0 0 0 auto;
+  cursor: pointer;
+  transition: background 0.18s;
+}
+.logout-btn:hover, .dashboard-header .btn-secondary:hover {
+  background: var(--color-primary-hover) !important;
 }
 
-.logout-btn:hover {
-  opacity: 0.9;
-}
 
 /* ==================== DASHBOARD HEADER ==================== */
 

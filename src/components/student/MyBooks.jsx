@@ -50,7 +50,7 @@ const MyBooks = ({ books, onReturn }) => {
                 )}
               </div>
               <button
-                onClick={() => handleReturn(item.transaction_id)}
+                onClick={() => handleReturn(item.id)}
                 className="btn btn-success"
               >
                 ✓ Return Book

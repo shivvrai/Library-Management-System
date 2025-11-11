@@ -127,13 +127,10 @@
   margin-bottom: 16px;
 }
 
-.btn-secondary {
-  background: #95a5a6;
-  color: white;
-}
+
 
 .btn-secondary:hover:not(:disabled) {
-  background: #7f8c8d;
+  background: #8bacae;
 }
 
 .divider {
@@ -199,3 +196,24 @@
     font-size: 15px;
   }
 }
+
+.btn btn-secondary btn-register {
+  background: rgb(231 22 61 / 67%);
+    color: rgb(14 12 12);
+  border: none;
+  font-weight: 700;
+  font-size: 17px;
+  padding: 13px 28px;
+  border-radius: 9px;
+  box-shadow: 0 2px 16px rgba(50, 190, 166, 0.12);
+  cursor: pointer;
+  margin-top: 18px;
+  letter-spacing: .03em;
+  transition: background .17s, box-shadow .18s;
+  background-color: #7f8c8d;
+}
+.btn-secondary:hover {
+  background: linear-gradient(120deg, #2193b0 0%, #32bea6 90%);
+  box-shadow: 0 3px 32px rgba(33, 147, 176, 0.15);
+}
+

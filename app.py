@@ -1,42 +1,139 @@
-# app.py - Flask Backend with SQLite Database Integration
+# app.py - FastAPI Backend with SQLite Database Integration
 import random
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from flask_jwt_extended import JWTManager, jwt_required, create_access_token, get_jwt_identity
-from database import get_db_connection, hash_password, verify_password
 import os
+import asyncio
 import re
 from datetime import datetime, timedelta
+from typing import Optional, List
 from functools import wraps
-from flask_jwt_extended import get_jwt
-app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+from fastapi import Request
+from fastapi import FastAPI, Depends, HTTPException, status, Query, Body, Path
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi_jwt_auth import AuthJWT
+from fastapi_jwt_auth.exceptions import AuthJWTException
+from pydantic import BaseModel
+import traceback
+from contextlib import asynccontextmanager
+from database import (
+    get_db_connection,
+    hash_password,
+    verify_password,
+    generate_registration_number,
+)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # startup logic
+    try:
+        from database import init_database
+        if not os.path.exists('library.db'):
+            print("🔄 Initializing new database...")
+            init_database()
+            print("✅ Database created with default admin user")
+        else:
+            print("✅ Using existing database")
+    except Exception:
+        print("❌ Database startup error:")
+        traceback.print_exc()
+        raise
+
+    yield  # application runs after this
+
+    # optional shutdown logic
+    try:
+        print("🔌 Shutting down application...")
+    except Exception:
+        print("❌ Error during shutdown:")
+        traceback.print_exc()
+# ==================== FastAPI Setup ====================
+app = FastAPI(
+    title="Library Management System",
+    description="Backend API for Library Management",
+    version="2.0.0",
+    lifespan=lifespan
+)
+
+# CORS Configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],  # add prod origins later
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+
+
 
 # JWT Configuration
-app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'library-system-secret-key-2025')
-app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=24)
-jwt = JWTManager(app)
+class Settings(BaseModel):
+    authjwt_secret_key: str = os.environ.get('JWT_SECRET_KEY', 'library-system-secret-key-2025')
+    authjwt_access_token_expires: int = 60 * 24  # 24 hours in minutes
 
-try:
-    from database import init_database  # Correct function name!
-    if not os.path.exists('library.db'):
-        print("🔄 Initializing new database...")
-        init_database()
-        print("✅ Database created with default admin user")
-    else:
-        print("✅ Using existing database")
-except Exception as e:
-    print(f"❌ Database error: {e}")
+@AuthJWT.load_config
+def get_config():
+    return Settings()
+
+
 
 # Constants
 FINE_PER_DAY = 10
 MAX_BOOKS_PER_STUDENT = 3
 RETURN_DAYS = 7
 
-# ==================== Utility Functions ====================
+# ==================== Pydantic Models ====================
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
-def validate_isbn13(isbn):
-    """Simple ISBN-13 validation - accepts any 13-digit number"""
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    name: str
+    email: str
+    phone: str
+
+class AddBookRequest(BaseModel):
+    title: str
+    author: str
+    isbn: str
+    pages: int
+    price: float
+    category: str
+    quantity: int
+
+class UpdateBookRequest(BaseModel):
+    title: Optional[str] = None
+    author: Optional[str] = None
+    pages: Optional[int] = None
+    price: Optional[float] = None
+    category: Optional[str] = None
+    quantity: Optional[int] = None
+
+class AddStudentRequest(BaseModel):
+    username: str
+    password: str
+    name: str
+    email: str
+    phone: str
+
+class UpdateStudentRequest(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    password: Optional[str] = None
+
+class BorrowBookRequest(BaseModel):
+    book_id: int
+
+class ReturnBookRequest(BaseModel):
+    transaction_id: int
+
+# ==================== Utility Functions ====================
+def validate_isbn13(isbn: str) -> bool:
+    """Validate ISBN-13 format"""
     isbn = re.sub(r'[-\s]', '', isbn)
     if len(isbn) != 13 or not isbn.isdigit():
         return False
@@ -52,212 +149,300 @@ def rows_to_dict_list(rows):
     """Convert list of sqlite3.Row to list of dictionaries"""
     return [dict(row) for row in rows]
 
-def calculate_fine(due_date_str):
-    """Calculate fine based on due date"""
+def calculate_fine(due_date_str: str) -> float:
+    """Calculate fine for overdue books"""
     if isinstance(due_date_str, str):
         due_date = datetime.fromisoformat(due_date_str)
     else:
         due_date = due_date_str
-    
     today = datetime.now()
     if today > due_date:
         days_overdue = (today - due_date).days
         return days_overdue * FINE_PER_DAY
     return 0
 
-# Role decorator (JWT temporarily bypassed for testing)
-def role_required(required_role):
-    def decorator(fn):
-        @wraps(fn)
-        def wrapper(*args, **kwargs):
-            # JWT TEMPORARILY BYPASSED FOR TESTING
-            return fn(*args, **kwargs)
-        return wrapper
-    return decorator
+# ==================== Dependency Injection for Roles ====================
+
+async def _extract_claims(Authorize: AuthJWT):
+    Authorize.jwt_required()
+    raw = Authorize.get_raw_jwt() or {}
+    user_claims = raw.get("user_claims") or raw.get("claims") or {}
+    merged = {}
+    merged.update(raw)
+    if isinstance(user_claims, dict):
+        merged.update(user_claims)
+    return merged
+
+async def verify_admin(Authorize: AuthJWT = Depends(), request: Request = None):
+    if request is not None and request.method == "OPTIONS":
+        return {}
+    try:
+        claims = await _extract_claims(Authorize)
+        print("DEBUG verify_admin claims:", claims)
+        if claims.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Admin access required")
+        return claims
+    except AuthJWTException as e:
+        print("DEBUG Auth error (admin):", e)
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+async def verify_student(Authorize: AuthJWT = Depends(), request: Request = None):
+    if request is not None and request.method == "OPTIONS":
+        return {}
+    try:
+        claims = await _extract_claims(Authorize)
+        print("DEBUG verify_student claims:", claims)
+        if claims.get("role") != "student":
+            raise HTTPException(status_code=403, detail="Student access required")
+        if not claims.get("id"):
+            raise HTTPException(status_code=401, detail="Authentication required: missing user id")
+        return claims
+    except AuthJWTException as e:
+        print("DEBUG Auth error (student):", e)
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+async def verify_any_user(Authorize: AuthJWT = Depends(), request: Request = None):
+    if request is not None and request.method == "OPTIONS":
+        return {}
+    try:
+        claims = await _extract_claims(Authorize)
+        print("DEBUG verify_any_user claims:", claims)
+        return claims
+    except AuthJWTException as e:
+        print("DEBUG Auth error (any):", e)
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+# ==================== Root & Health Check ====================
+@app.get("/")
+async def root():
+    return {
+        "message": "Library Management System API",
+        "version": "2.0.0",
+        "database": "SQLite",
+        "roles": ["admin", "student"]
+    }
+
+@app.get("/api/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat()
+    }
 
 # ==================== Authentication Routes ====================
-
-@app.route('/api/auth/login', methods=['POST'])
-def login():
+@app.post("/api/auth/login")
+async def login(data: LoginRequest, Authorize: AuthJWT = Depends()):
+    """Login endpoint for admin or student"""
     try:
-        data = request.get_json()
-        username = data.get('username', '').strip()
-        password = data.get('password', '')
+        username = data.username.strip()
+        password = data.password
         
         if not username or not password:
-            return jsonify({'error': 'Username and password are required'}), 400
+            raise HTTPException(status_code=400, detail="Username and password are required")
         
         conn = get_db_connection()
         
-        # Check admin credentials
+        # Check admin
         admin = conn.execute('SELECT * FROM admins WHERE username = ?', (username,)).fetchone()
+        if admin and verify_password(password, admin['password']):
+            access_token = Authorize.create_access_token(
+                subject=username,
+                user_claims={
+                    'role': admin['role'],
+                    'name': admin['name'],
+                    'id': admin['id']
+                }
+            )
+            conn.close()
+            return {
+                'success': True,
+                'token': access_token,
+                'user': {
+                    'username': username,
+                    'role': admin['role'],
+                    'name': admin['name']
+                }
+            }
         
-        if admin:
-            if verify_password(password, admin['password']):
-                # Use username as identity (string), pass other data as additional_claims
-                access_token = create_access_token(
-                    identity=username,
-                    additional_claims={
-                        'role': admin['role'],
-                        'name': admin['name']
-                    }
-                )
-                conn.close()
-                return jsonify({
-                    'success': True,
-                    'token': access_token,
-                    'user': {
-                        'username': username,
-                        'role': admin['role'],
-                        'name': admin['name']
-                    }
-                }), 200
-        
-        # Check student credentials
+        # Check student
         student = conn.execute('SELECT * FROM students WHERE username = ?', (username,)).fetchone()
-        
-        if student:
-            if verify_password(password, student['password']):
-                # Use username as identity (string), pass other data as additional_claims
-                access_token = create_access_token(
-                    identity=username,
-                    additional_claims={
-                        'role': student['role'],
-                        'id': student['id'],
-                        'name': student['name']
-                    }
-                )
-                conn.close()
-                return jsonify({
-                    'success': True,
-                    'token': access_token,
-                    'user': {
-                        'username': username,
-                        'role': student['role'],
-                        'id': student['id'],
-                        'name': student['name'],
-                        'borrowed_books': student['borrowed_books'],
-                        'fine_amount': student['fine_amount']
-                    }
-                }), 200
+        if student and verify_password(password, student['password']):
+            access_token = Authorize.create_access_token(
+                subject=username,
+                user_claims={
+                    'role': student['role'],
+                    'id': student['id'],
+                    'name': student['name']
+                }
+            )
+            conn.close()
+            return {
+                'success': True,
+                'token': access_token,
+                'user': {
+                    'username': username,
+                    'role': student['role'],
+                    'id': student['id'],
+                    'name': student['name'],
+                    'borrowed_books': student['borrowed_books'],
+                    'fine_amount': student['fine_amount']
+                }
+            }
         
         conn.close()
-        return jsonify({'success': False, 'error': 'Invalid credentials'}), 401
-        
+        raise HTTPException(status_code=401, detail="Invalid credentials")
     except Exception as e:
-        return jsonify({'error': 'Login failed', 'details': str(e)}), 500
+        raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
 
-# ==================== Admin Routes ====================
+@app.post("/api/auth/register")
+async def register(data: RegisterRequest):
+    """Register new student"""
+    try:
+        conn = get_db_connection()
+        
+        # Check if username exists
+        existing = conn.execute('SELECT id FROM students WHERE username = ?', (data.username,)).fetchone()
+        if existing:
+            conn.close()
+            raise HTTPException(status_code=400, detail="Username already exists")
+        
+        # Generate registration number
+        reg_no = generate_registration_number()
+        
+        # Hash password
+        hashed_pw = hash_password(data.password)
+        
+        # Insert student
+        cursor = conn.execute(
+            '''INSERT INTO students (registration_no, username, password, name, email, phone, role)
+               VALUES (?, ?, ?, ?, ?, ?, ?)''',
+            (reg_no, data.username, hashed_pw, data.name, data.email, data.phone, 'student')
+        )
+        conn.commit()
+        
+        new_student = conn.execute('SELECT * FROM students WHERE id = ?', (cursor.lastrowid,)).fetchone()
+        conn.close()
+        
+        student_dict = row_to_dict(new_student)
+        student_dict.pop('password', None)
+        
+        return {
+            'success': True,
+            'message': 'Student registered successfully',
+            'student': student_dict
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
 
-@app.route('/api/admin/books', methods=['GET'])
-@role_required('admin')
-def admin_get_books():
+@app.post("/api/auth/check-username")
+async def check_username(username: str = Query(...)):
+    """Check if username is available"""
+    try:
+        conn = get_db_connection()
+        
+        admin = conn.execute('SELECT id FROM admins WHERE username = ?', (username,)).fetchone()
+        student = conn.execute('SELECT id FROM students WHERE username = ?', (username,)).fetchone()
+        
+        conn.close()
+        
+        if admin or student:
+            return {'available': False}
+        return {'available': True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Check failed: {str(e)}")
+
+# ==================== Admin Book Routes ====================
+@app.get("/api/admin/books")
+async def admin_get_books(claims = Depends(verify_admin)):
+    """Get all books (admin only)"""
     try:
         conn = get_db_connection()
         books = conn.execute('SELECT * FROM books ORDER BY created_at DESC').fetchall()
         conn.close()
-        return jsonify(rows_to_dict_list(books)), 200
+        return rows_to_dict_list(books)
     except Exception as e:
-        return jsonify({'error': 'Failed to fetch books', 'details': str(e)}), 500
+        raise HTTPException(status_code=500, detail=f"Failed to fetch books: {str(e)}")
 
-@app.route('/api/admin/books', methods=['POST'])
-@role_required('admin')
-def admin_add_book():
+
+@app.post("/api/admin/books")
+async def admin_add_book(data: AddBookRequest, claims = Depends(verify_admin)):
+    """Add new book (admin only)"""
     try:
-        data = request.get_json()
+        isbn = data.isbn.strip()
         
-        # Validate required fields - FIXED TO HANDLE 0 VALUES
-        required_fields = ['title', 'author', 'pages', 'price', 'isbn', 'category', 'quantity']
-        for field in required_fields:
-            if field not in data or data[field] is None or (isinstance(data[field], str) and data[field].strip() == ''):
-                return jsonify({'error': f'{field} is required'}), 400
-        
-        isbn = data['isbn'].strip()
         if not validate_isbn13(isbn):
-            return jsonify({'error': 'Invalid ISBN-13 format'}), 400
+            raise HTTPException(status_code=400, detail="Invalid ISBN-13 format")
         
         conn = get_db_connection()
         
-        # Check for duplicate ISBN or title
         existing = conn.execute(
             'SELECT id FROM books WHERE isbn = ? OR title = ?',
-            (isbn, data['title'].strip())
+            (isbn, data.title.strip())
         ).fetchone()
         
         if existing:
             conn.close()
-            return jsonify({'error': 'Book with this ISBN or title already exists'}), 400
+            raise HTTPException(status_code=400, detail="Book with this ISBN or title already exists")
         
-        # Insert new book
-        quantity = int(data['quantity'])
-        cursor = conn.execute('''
-            INSERT INTO books (title, author, isbn, pages, price, category, quantity, available)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            data['title'].strip(),
-            data['author'].strip(),
-            isbn,
-            int(data['pages']),
-            round(float(data['price']), 2),
-            data['category'].strip(),
-            quantity,
-            quantity
-        ))
-        
+        quantity = int(data.quantity)
+        cursor = conn.execute(
+            '''INSERT INTO books (title, author, isbn, pages, price, category, quantity, available)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+            (
+                data.title.strip(),
+                data.author.strip(),
+                isbn,
+                int(data.pages),
+                round(float(data.price), 2),
+                data.category.strip(),
+                quantity,
+                quantity
+            )
+        )
         conn.commit()
         
-        # Fetch the newly created book
         new_book = conn.execute('SELECT * FROM books WHERE id = ?', (cursor.lastrowid,)).fetchone()
         conn.close()
         
-        return jsonify({'success': True, 'book': row_to_dict(new_book)}), 201
-        
+        return {'success': True, 'book': row_to_dict(new_book)}
     except Exception as e:
-        return jsonify({'error': 'Failed to add book', 'details': str(e)}), 500
+        raise HTTPException(status_code=500, detail=f"Failed to add book: {str(e)}")
 
-@app.route('/api/admin/books/<int:book_id>', methods=['PUT'])
-@role_required('admin')
-def admin_update_book(book_id):
+
+@app.put("/api/admin/books/{book_id}")
+async def admin_update_book(book_id: int = Path(...), data: UpdateBookRequest = Body(...), claims = Depends(verify_admin)):
+    """Update book (admin only)"""
     try:
-        data = request.get_json()
         conn = get_db_connection()
         
-        # Check if book exists
         book = conn.execute('SELECT * FROM books WHERE id = ?', (book_id,)).fetchone()
         if not book:
             conn.close()
-            return jsonify({'error': 'Book not found'}), 404
+            raise HTTPException(status_code=404, detail="Book not found")
         
-        # Build update query dynamically
-        update_fields = []
-        update_values = []
+        update_fields, update_values = [], []
         
-        if 'title' in data:
+        if data.title is not None:
             update_fields.append('title = ?')
-            update_values.append(data['title'].strip())
-        
-        if 'author' in data:
+            update_values.append(data.title.strip())
+        if data.author is not None:
             update_fields.append('author = ?')
-            update_values.append(data['author'].strip())
-        
-        if 'pages' in data:
+            update_values.append(data.author.strip())
+        if data.pages is not None:
             update_fields.append('pages = ?')
-            update_values.append(int(data['pages']))
-        
-        if 'price' in data:
+            update_values.append(int(data.pages))
+        if data.price is not None:
             update_fields.append('price = ?')
-            update_values.append(round(float(data['price']), 2))
-        
-        if 'category' in data:
+            update_values.append(round(float(data.price), 2))
+        if data.category is not None:
             update_fields.append('category = ?')
-            update_values.append(data['category'].strip())
-        
-        if 'quantity' in data:
-            new_quantity = int(data['quantity'])
+            update_values.append(data.category.strip())
+        if data.quantity is not None:
+            new_quantity = int(data.quantity)
             diff = new_quantity - book['quantity']
             update_fields.append('quantity = ?')
-            update_fields.append('available = ?')
             update_values.append(new_quantity)
+            update_fields.append('available = ?')
             update_values.append(max(0, book['available'] + diff))
         
         if update_fields:
@@ -266,28 +451,25 @@ def admin_update_book(book_id):
             conn.execute(query, update_values)
             conn.commit()
         
-        # Fetch updated book
         updated_book = conn.execute('SELECT * FROM books WHERE id = ?', (book_id,)).fetchone()
         conn.close()
         
-        return jsonify({'success': True, 'book': row_to_dict(updated_book)}), 200
-        
+        return {'success': True, 'book': row_to_dict(updated_book)}
     except Exception as e:
-        return jsonify({'error': 'Failed to update book', 'details': str(e)}), 500
+        raise HTTPException(status_code=500, detail=f"Failed to update book: {str(e)}")
 
-@app.route('/api/admin/books/<int:book_id>', methods=['DELETE'])
-@role_required('admin')
-def admin_delete_book(book_id):
+
+@app.delete("/api/admin/books/{book_id}")
+async def admin_delete_book(book_id: int = Path(...), claims = Depends(verify_admin)):
+    """Delete book (admin only)"""
     try:
         conn = get_db_connection()
         
-        # Check if book exists
         book = conn.execute('SELECT * FROM books WHERE id = ?', (book_id,)).fetchone()
         if not book:
             conn.close()
-            return jsonify({'error': 'Book not found'}), 404
+            raise HTTPException(status_code=404, detail="Book not found")
         
-        # Check if book is currently borrowed
         borrowed = conn.execute(
             'SELECT id FROM transactions WHERE book_id = ? AND status = ?',
             (book_id, 'borrowed')
@@ -295,828 +477,111 @@ def admin_delete_book(book_id):
         
         if borrowed:
             conn.close()
-            return jsonify({'error': 'Cannot delete book that is currently borrowed'}), 400
+            raise HTTPException(status_code=400, detail="Cannot delete book that is currently borrowed")
         
-        # Delete the book
         conn.execute('DELETE FROM books WHERE id = ?', (book_id,))
         conn.commit()
         conn.close()
         
-        return jsonify({'success': True, 'message': 'Book deleted successfully'}), 200
-        
+        return {'success': True, 'message': 'Book deleted successfully'}
     except Exception as e:
-        return jsonify({'error': 'Failed to delete book', 'details': str(e)}), 500
+        raise HTTPException(status_code=500, detail=f"Failed to delete book: {str(e)}")
 
-@app.route('/api/admin/students', methods=['GET'])
-@role_required('admin')
-def admin_get_students():
+
+@app.get("/api/admin/books/search")
+async def admin_search_books(query: str = Query(...), claims = Depends(verify_admin)):
+    """Search books by title, author, or ISBN"""
+    try:
+        conn = get_db_connection()
+        search_term = f"%{query}%"
+        
+        books = conn.execute(
+            '''SELECT * FROM books WHERE title LIKE ? OR author LIKE ? OR isbn LIKE ?
+               ORDER BY created_at DESC''',
+            (search_term, search_term, search_term)
+        ).fetchall()
+        
+        conn.close()
+        return rows_to_dict_list(books)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
+# ==================== Admin Student Routes ====================
+@app.get("/api/admin/students")
+async def admin_get_students(claims = Depends(verify_admin)):
+    """Get all students (admin only)"""
     try:
         conn = get_db_connection()
         students = conn.execute('SELECT * FROM students ORDER BY created_at DESC').fetchall()
         conn.close()
         
-        student_list = []
-        for student in students:
-            student_dict = row_to_dict(student)
-            # Don't send password to frontend
-            student_dict.pop('password', None)
-            student_list.append(student_dict)
+        students_list = rows_to_dict_list(students)
+        for student in students_list:
+            student.pop('password', None)
         
-        return jsonify(student_list), 200
-        
+        return students_list
     except Exception as e:
-        return jsonify({'error': 'Failed to fetch students', 'details': str(e)}), 500
-
-@app.route('/api/admin/transactions', methods=['GET'])
-@role_required('admin')
-def admin_get_transactions():
-    try:
-        conn = get_db_connection()
-        transactions = conn.execute('''
-            SELECT 
-                t.*,
-                b.title as book_title,
-                s.name as student_name
-            FROM transactions t
-            LEFT JOIN books b ON t.book_id = b.id
-            LEFT JOIN students s ON t.student_id = s.id
-            ORDER BY t.created_at DESC
-        ''').fetchall()
-        conn.close()
-        
-        enriched_transactions = []
-        for trans in transactions:
-            trans_dict = row_to_dict(trans)
-            if trans_dict['status'] == 'borrowed':
-                trans_dict['fine'] = calculate_fine(trans_dict['due_date'])
-            else:
-                trans_dict['fine'] = trans_dict.get('fine_amount', 0)
-            enriched_transactions.append(trans_dict)
-        
-        return jsonify(enriched_transactions), 200
-        
-    except Exception as e:
-        return jsonify({'error': 'Failed to fetch transactions', 'details': str(e)}), 500
-
-@app.route('/api/admin/overdue', methods=['GET'])
-@role_required('admin')
-def admin_get_overdue():
-    try:
-        conn = get_db_connection()
-        today = datetime.now()
-        
-        overdue_transactions = conn.execute('''
-            SELECT 
-                t.*,
-                b.title as book_title,
-                s.name as student_name,
-                s.id as student_id
-            FROM transactions t
-            LEFT JOIN books b ON t.book_id = b.id
-            LEFT JOIN students s ON t.student_id = s.id
-            WHERE t.status = ? AND t.due_date < ?
-            ORDER BY t.due_date ASC
-        ''', ('borrowed', today.isoformat())).fetchall()
-        conn.close()
-        
-        overdue_list = []
-        for trans in overdue_transactions:
-            trans_dict = row_to_dict(trans)
-            due_date = datetime.fromisoformat(trans_dict['due_date'])
-            days_overdue = (today - due_date).days
-            fine = days_overdue * FINE_PER_DAY
-            
-            trans_dict['days_overdue'] = days_overdue
-            trans_dict['fine'] = fine
-            overdue_list.append(trans_dict)
-        
-        return jsonify(overdue_list), 200
-        
-    except Exception as e:
-        return jsonify({'error': 'Failed to fetch overdue books', 'details': str(e)}), 500
-
-@app.route('/api/admin/books/<int:book_id>/quantity', methods=['PATCH'])
-@role_required('admin')
-def admin_update_book_quantity(book_id):
-    """Increment or decrement book quantity"""
-    try:
-        data = request.get_json()
-        action = data.get('action')  # 'increment' or 'decrement'
-        amount = int(data.get('amount', 1))
-        
-        if action not in ['increment', 'decrement']:
-            return jsonify({'error': 'Invalid action. Use "increment" or "decrement"'}), 400
-        
-        conn = get_db_connection()
-        
-        # Get current book
-        book = conn.execute('SELECT * FROM books WHERE id = ?', (book_id,)).fetchone()
-        if not book:
-            conn.close()
-            return jsonify({'error': 'Book not found'}), 404
-        
-        current_qty = book['quantity']
-        current_available = book['available']
-        
-        if action == 'increment':
-            new_qty = current_qty + amount
-            new_available = current_available + amount
-        else:  # decrement
-            if amount > current_available:
-                conn.close()
-                return jsonify({'error': f'Cannot decrement. Only {current_available} copies available.'}), 400
-            new_qty = current_qty - amount
-            new_available = current_available - amount
-        
-        # Update quantities
-        conn.execute('''
-            UPDATE books
-            SET quantity = ?, available = ?
-            WHERE id = ?
-        ''', (new_qty, new_available, book_id))
-        
-        conn.commit()
-        
-        # Get updated book
-        updated_book = conn.execute('SELECT * FROM books WHERE id = ?', (book_id,)).fetchone()
-        conn.close()
-        
-        return jsonify({
-            'success': True,
-            'message': f'Quantity {action}ed by {amount}',
-            'book': row_to_dict(updated_book)
-        }), 200
-        
-    except Exception as e:
-        return jsonify({'error': 'Failed to update quantity', 'details': str(e)}), 500
+        raise HTTPException(status_code=500, detail=f"Failed to fetch students: {str(e)}")
 
 
-@app.route('/api/admin/return/<int:transaction_id>', methods=['POST'])
-@role_required('admin')
-def admin_process_return(transaction_id):
+@app.post("/api/admin/students")
+async def admin_add_student(data: AddStudentRequest, claims = Depends(verify_admin)):
+    """Add new student (admin only)"""
     try:
         conn = get_db_connection()
         
-        # Get transaction
-        trans = conn.execute('SELECT * FROM transactions WHERE id = ?', (transaction_id,)).fetchone()
-        if not trans:
-            conn.close()
-            return jsonify({'error': 'Transaction not found'}), 404
-        
-        if trans['status'] != 'borrowed':
-            conn.close()
-            return jsonify({'error': 'Book already returned'}), 400
-        
-        # Calculate fine
-        fine = calculate_fine(trans['due_date'])
-        
-        # Update transaction
-        conn.execute('''
-            UPDATE transactions
-            SET status = ?, return_date = ?, fine_amount = ?
-            WHERE id = ?
-        ''', ('returned', datetime.now().isoformat(), fine, transaction_id))
-        
-        # Update book availability
-        conn.execute('''
-            UPDATE books
-            SET available = available + 1
-            WHERE id = ?
-        ''', (trans['book_id'],))
-        
-        # Update student
-        conn.execute('''
-            UPDATE students
-            SET borrowed_books = borrowed_books - 1,
-                fine_amount = fine_amount + ?
-            WHERE id = ?
-        ''', (fine, trans['student_id']))
-        
-        conn.commit()
-        conn.close()
-        
-        return jsonify({
-            'success': True,
-            'fine': fine,
-            'message': f'Book returned. Fine: ₹{fine}' if fine > 0 else 'Book returned successfully'
-        }), 200
-        
-    except Exception as e:
-        return jsonify({'error': 'Failed to process return', 'details': str(e)}), 500
-
-@app.route('/api/admin/stats', methods=['GET'])
-@role_required('admin')
-def admin_get_stats():
-    try:
-        conn = get_db_connection()
-        
-        total_books = conn.execute('SELECT COUNT(*) as count FROM books').fetchone()['count']
-        total_students = conn.execute('SELECT COUNT(*) as count FROM students').fetchone()['count']
-        active_borrows = conn.execute(
-            'SELECT COUNT(*) as count FROM transactions WHERE status = ?',
-            ('borrowed',)
-        ).fetchone()['count']
-        
-        # Get overdue count
-        today = datetime.now().isoformat()
-        overdue_count = conn.execute(
-            'SELECT COUNT(*) as count FROM transactions WHERE status = ? AND due_date < ?',
-            ('borrowed', today)
-        ).fetchone()['count']
-        
-        # Get total fines
-        total_fines = conn.execute('SELECT SUM(fine_amount) as total FROM students').fetchone()['total'] or 0
-        total_transactions = conn.execute('SELECT COUNT(*) as count FROM transactions').fetchone()['count']
-        
-        conn.close()
-        
-        return jsonify({
-            'total_books': total_books,
-            'total_students': total_students,
-            'active_borrows': active_borrows,
-            'overdue_books': overdue_count,
-            'total_fines': round(total_fines, 2),
-            'total_transactions': total_transactions
-        }), 200
-        
-    except Exception as e:
-        return jsonify({'error': 'Failed to get stats', 'details': str(e)}), 500
-
-
-# ==================== Student Routes ====================
-
-@app.route('/api/student/books/available', methods=['GET'])
-@jwt_required()
-def student_get_available_books():
-    try:
-        conn = get_db_connection()
-        books = conn.execute('SELECT * FROM books WHERE available > 0 ORDER BY title ASC').fetchall()
-        conn.close()
-        return jsonify(rows_to_dict_list(books)), 200
-    except Exception as e:
-        return jsonify({'error': 'Failed to fetch books', 'details': str(e)}), 500
-@app.route('/api/student/borrow', methods=['POST'])
-@jwt_required()
-def student_borrow_book():
-    try:
-        from database import get_next_transaction_id
-        
-        identity = get_jwt_identity()
-        claims = get_jwt()
-        student_id = claims.get('id')
-        
-        data = request.get_json()
-        book_id = data.get('book_id')
-        
-        conn = get_db_connection()
-        
-        # Get student and book
-        student = conn.execute('SELECT * FROM students WHERE id = ?', (student_id,)).fetchone()
-        book = conn.execute('SELECT * FROM books WHERE id = ?', (book_id,)).fetchone()
-        
-        if not student or not book:
-            conn.close()
-            return jsonify({'error': 'Student or book not found'}), 404
-        
-        # Validate borrowing rules
-        if student['borrowed_books'] >= MAX_BOOKS_PER_STUDENT:
-            conn.close()
-            return jsonify({'error': f'Cannot borrow more than {MAX_BOOKS_PER_STUDENT} books at a time'}), 400
-        
-        if book['available'] <= 0:
-            conn.close()
-            return jsonify({'error': 'Book is not available'}), 400
-        
-        # Check for overdue books
-        today = datetime.now().isoformat()
-        overdue = conn.execute(
-            'SELECT id FROM transactions WHERE student_id = ? AND status = ? AND due_date < ?',
-            (student_id, 'borrowed', today)
-        ).fetchone()
-        
-        if overdue:
-            conn.close()
-            return jsonify({'error': 'Cannot borrow. You have overdue books. Please return them first.'}), 400
-        
-        if student['fine_amount'] > 0:
-            conn.close()
-            return jsonify({'error': f'Cannot borrow. Please pay pending fine of ₹{student["fine_amount"]}'}), 400
-        
-        # Check if student already has this book borrowed
-        already_borrowed = conn.execute('''
-            SELECT id FROM transactions
-            WHERE student_id = ? AND book_id = ? AND status = ?
-        ''', (student_id, book_id, 'borrowed')).fetchone()
-        
-        if already_borrowed:
-            conn.close()
-            return jsonify({'error': 'You already have this book borrowed. Please return it before borrowing again.'}), 400
-        
-        # Generate transaction ID
-        transaction_id = get_next_transaction_id()
-        
-        # Create transaction
-        borrow_date = datetime.now()
-        due_date = borrow_date + timedelta(days=RETURN_DAYS)
-        
-        cursor = conn.execute('''
-            INSERT INTO transactions (
-                transaction_id, student_id, student_registration_no, 
-                book_id, borrow_date, due_date, status
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            transaction_id,
-            student_id,
-            student['registration_no'],
-            book_id,
-            borrow_date.isoformat(),
-            due_date.isoformat(),
-            'borrowed'
-        ))
-        
-        # Update book availability
-        conn.execute('UPDATE books SET available = available - 1 WHERE id = ?', (book_id,))
-        
-        # Update student borrowed count
-        conn.execute('UPDATE students SET borrowed_books = borrowed_books + 1 WHERE id = ?', (student_id,))
-        
-        conn.commit()
-        
-        # Get created transaction
-        transaction = conn.execute('SELECT * FROM transactions WHERE id = ?', (cursor.lastrowid,)).fetchone()
-        conn.close()
-        
-        return jsonify({
-            'success': True,
-            'message': 'Book borrowed successfully',
-            'transaction': row_to_dict(transaction),
-            'transaction_id': transaction_id,
-            'due_date': due_date.strftime('%Y-%m-%d')
-        }), 201
-        
-    except Exception as e:
-        return jsonify({'error': 'Failed to borrow book', 'details': str(e)}), 500
-
-@app.route('/api/student/my-books', methods=['GET'])
-@jwt_required()
-def student_get_my_books():
-    try:
-        identity = get_jwt_identity()  # This is now the username string
-        claims = get_jwt()  # Get the full JWT payload
-        student_id = claims.get('id')
-        role = claims.get('role')
-        
-        conn = get_db_connection()
-        
-        my_books_data = conn.execute('''
-            SELECT 
-                t.*,
-                b.title, b.author, b.isbn, b.category, b.pages, b.price
-            FROM transactions t
-            JOIN books b ON t.book_id = b.id
-            WHERE t.student_id = ? AND t.status = ?
-            ORDER BY t.due_date ASC
-        ''', (student_id, 'borrowed')).fetchall()
-        
-        conn.close()
-        
-        my_books = []
-        today = datetime.now()
-        
-        for item in my_books_data:
-            item_dict = row_to_dict(item)
-            due_date = datetime.fromisoformat(item_dict['due_date'])
-            days_remaining = (due_date - today).days
-            fine = calculate_fine(item_dict['due_date'])
-            
-            # Build book object
-            book = {
-                'id': item_dict['book_id'],
-                'title': item_dict['title'],
-                'author': item_dict['author'],
-                'isbn': item_dict['isbn'],
-                'category': item_dict['category'],
-                'pages': item_dict['pages'],
-                'price': item_dict['price']
-            }
-            
-            my_books.append({
-                'transaction_id': item_dict['id'],
-                'book': book,
-                'borrow_date': item_dict['borrow_date'],
-                'due_date': item_dict['due_date'],
-                'days_remaining': days_remaining,
-                'is_overdue': days_remaining < 0,
-                'fine': fine
-            })
-        
-        return jsonify(my_books), 200
-        
-    except Exception as e:
-        return jsonify({'error': 'Failed to fetch borrowed books', 'details': str(e)}), 500
-
-@app.route('/api/student/return/<int:transaction_id>', methods=['POST'])
-@jwt_required()
-def student_return_book(transaction_id):
-    try:
-        identity = get_jwt_identity()  # This is now the username string
-        claims = get_jwt()  # Get the full JWT payload
-        student_id = claims.get('id')
-        role = claims.get('role')
-        
-        conn = get_db_connection()
-        
-        # Get transaction
-        trans = conn.execute('SELECT * FROM transactions WHERE id = ?', (transaction_id,)).fetchone()
-        if not trans:
-            conn.close()
-            return jsonify({'error': 'Transaction not found'}), 404
-        
-        if trans['student_id'] != student_id:
-            conn.close()
-            return jsonify({'error': 'Unauthorized'}), 403
-        
-        if trans['status'] != 'borrowed':
-            conn.close()
-            return jsonify({'error': 'Book already returned'}), 400
-        
-        # Calculate fine
-        fine = calculate_fine(trans['due_date'])
-        
-        # Update transaction
-        conn.execute('''
-            UPDATE transactions
-            SET status = ?, return_date = ?, fine_amount = ?
-            WHERE id = ?
-        ''', ('returned', datetime.now().isoformat(), fine, transaction_id))
-        
-        # Update book availability
-        conn.execute('UPDATE books SET available = available + 1 WHERE id = ?', (trans['book_id'],))
-        
-        # Update student
-        update_query = 'UPDATE students SET borrowed_books = borrowed_books - 1'
-        params = [student_id]
-        
-        if fine > 0:
-            update_query += ', fine_amount = fine_amount + ?'
-            params.insert(0, fine)
-        
-        update_query += ' WHERE id = ?'
-        conn.execute(update_query, params)
-        
-        conn.commit()
-        conn.close()
-        
-        return jsonify({
-            'success': True,
-            'fine': fine,
-            'message': f'Book returned successfully. Fine: ₹{fine}' if fine > 0 else 'Book returned successfully'
-        }), 200
-        
-    except Exception as e:
-        return jsonify({'error': 'Failed to return book', 'details': str(e)}), 500
-
-# Add this AFTER the @app.route('/api/student/return/<int:transaction_id>') route
-
-@app.route('/api/student/fines', methods=['GET'])
-@jwt_required()
-def student_get_fines():
-    try:
-        identity = get_jwt_identity()  # This is now the username string
-        claims = get_jwt()  # Get the full JWT payload
-        student_id = claims.get('id')
-        role = claims.get('role')
-        
-        conn = get_db_connection()
-        student = conn.execute('SELECT borrowed_books, fine_amount FROM students WHERE id = ?', (student_id,)).fetchone()
-        conn.close()
-        
-        if not student:
-            return jsonify({'error': 'Student not found'}), 404
-            
-        return jsonify({
-            'borrowed_books': student['borrowed_books'],
-            'fine_amount': student['fine_amount']
-        }), 200
-        
-    except Exception as e:
-        return jsonify({'error': 'Failed to get fines', 'details': str(e)}), 500
-
-
-
-
-# ==================== Health Check ====================
-
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()}), 200
-
-@app.route('/', methods=['GET'])
-def root():
-    return jsonify({
-        'message': 'Library Management System API',
-        'version': '2.0.0',
-        'database': 'SQLite',
-        'roles': ['admin', 'student']
-    }), 200
-
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({'error': 'Endpoint not found'}), 404
-
-@app.errorhandler(500)
-def internal_error(error):
-    return jsonify({'error': 'Internal server error'}), 500
-
-# ==================== Book Search Routes ====================
-
-@app.route('/api/admin/books/search', methods=['GET'])
-@role_required('admin')
-def admin_search_books():
-    """Search books by title, author, ISBN, or category"""
-    try:
-        query = request.args.get('q', '').strip()
-        
-        conn = get_db_connection()
-        
-        if query:
-            books = conn.execute('''
-                SELECT * FROM books
-                WHERE title LIKE ? OR author LIKE ? OR isbn LIKE ? OR category LIKE ?
-                ORDER BY title ASC
-            ''', (f'%{query}%', f'%{query}%', f'%{query}%', f'%{query}%')).fetchall()
-        else:
-            books = conn.execute('SELECT * FROM books ORDER BY title ASC').fetchall()
-        
-        conn.close()
-        return jsonify(rows_to_dict_list(books)), 200
-        
-    except Exception as e:
-        return jsonify({'error': 'Failed to search books', 'details': str(e)}), 500
-
-
-@app.route('/api/student/books/search', methods=['GET'])
-@jwt_required()
-def student_search_books():
-    """Search available books by title, author, ISBN, or category"""
-    try:
-        query = request.args.get('q', '').strip()
-        
-        conn = get_db_connection()
-        
-        if query:
-            books = conn.execute('''
-                SELECT * FROM books
-                WHERE available > 0 AND (title LIKE ? OR author LIKE ? OR isbn LIKE ? OR category LIKE ?)
-                ORDER BY title ASC
-            ''', (f'%{query}%', f'%{query}%', f'%{query}%', f'%{query}%')).fetchall()
-        else:
-            books = conn.execute('SELECT * FROM books WHERE available > 0 ORDER BY title ASC').fetchall()
-        
-        conn.close()
-        return jsonify(rows_to_dict_list(books)), 200
-        
-    except Exception as e:
-        return jsonify({'error': 'Failed to search books', 'details': str(e)}), 500
-
-
-# ==================== Student Registration Routes ====================
-
-@app.route('/api/auth/register', methods=['POST'])
-def register_student():
-    """Self-registration for students"""
-    try:
-        from database import generate_registration_number
-        
-        data = request.get_json()
-        
-        # Validate required fields
-        required_fields = ['name', 'username', 'password', 'email', 'phone']
-        for field in required_fields:
-            if not data.get(field):
-                return jsonify({'error': f'{field} is required'}), 400
-        
-        conn = get_db_connection()
-        
-        # Check for duplicate username
-        existing = conn.execute('SELECT id FROM students WHERE username = ?', (data['username'],)).fetchone()
+        existing = conn.execute('SELECT id FROM students WHERE username = ?', (data.username,)).fetchone()
         if existing:
             conn.close()
-            return jsonify({'error': 'Username already exists'}), 400
+            raise HTTPException(status_code=400, detail="Username already exists")
         
-        # Check for duplicate email
-        existing_email = conn.execute('SELECT id FROM students WHERE email = ?', (data['email'],)).fetchone()
-        if existing_email:
-            conn.close()
-            return jsonify({'error': 'Email already registered'}), 400
-        
-        # Generate registration number
         reg_no = generate_registration_number()
+        hashed_pw = hash_password(data.password)
         
-        # Hash password
-        hashed_pw = hash_password(data['password'])
-        
-        # Insert student
-        cursor = conn.execute('''
-            INSERT INTO students (registration_no, username, password, name, email, phone, role)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            reg_no,
-            data['username'],
-            hashed_pw,
-            data['name'],
-            data['email'],
-            data['phone'],
-            'student'
-        ))
-        
-        conn.commit()
-        conn.close()
-        
-        return jsonify({
-            'success': True,
-            'message': 'Registration successful! You can now login.',
-            'registration_no': reg_no
-        }), 201
-        
-    except Exception as e:
-        return jsonify({'error': 'Registration failed', 'details': str(e)}), 500
-
-
-@app.route('/api/auth/check-username', methods=['GET'])
-def check_username():
-    """Check if username is available"""
-    try:
-        username = request.args.get('username', '').strip()
-        
-        if not username:
-            return jsonify({'available': False, 'error': 'Username is required'}), 400
-        
-        if len(username) < 3:
-            return jsonify({'available': False, 'error': 'Username must be at least 3 characters'}), 400
-        
-        conn = get_db_connection()
-        
-        # Check in both students and admins
-        student = conn.execute('SELECT id FROM students WHERE username = ?', (username,)).fetchone()
-        admin = conn.execute('SELECT id FROM admins WHERE username = ?', (username,)).fetchone()
-        
-        conn.close()
-        
-        if student or admin:
-            return jsonify({'available': False, 'message': 'Username is already taken'}), 200
-        
-        return jsonify({'available': True, 'message': 'Username is available'}), 200
-        
-    except Exception as e:
-        return jsonify({'error': 'Failed to check username', 'details': str(e)}), 500
-
-
-@app.route('/api/auth/suggest-usernames', methods=['GET'])
-def suggest_usernames():
-    """Generate 3 username suggestions based on name"""
-    try:
-        name = request.args.get('name', '').strip()
-        
-        if not name:
-            return jsonify({'suggestions': []}), 200
-        
-        # Generate suggestions
-        parts = name.lower().split()
-        suggestions = []
-        
-        if len(parts) >= 2:
-            # Format: firstname.lastname
-            suggestions.append(f"{parts[0]}.{parts[-1]}")
-            # Format: firstinitial + lastname
-            suggestions.append(f"{parts[0][0]}{parts[-1]}")
-            # Format: firstname + lastinitial
-            suggestions.append(f"{parts[0]}{parts[-1][0]}")
-        elif len(parts) == 1:
-            # Single name - add numbers
-            suggestions.append(f"{parts[0]}123")
-            suggestions.append(f"{parts[0]}_{random.randint(100, 999)}")
-            suggestions.append(f"{parts[0]}{random.randint(10, 99)}")
-        
-        # Check which suggestions are available
-        conn = get_db_connection()
-        available_suggestions = []
-        
-        for suggestion in suggestions:
-            student = conn.execute('SELECT id FROM students WHERE username = ?', (suggestion,)).fetchone()
-            admin = conn.execute('SELECT id FROM admins WHERE username = ?', (suggestion,)).fetchone()
-            
-            if not student and not admin:
-                available_suggestions.append(suggestion)
-        
-        conn.close()
-        
-        # If all taken, add random numbers
-        while len(available_suggestions) < 3:
-            random_suggestion = f"{parts[0]}{random.randint(1000, 9999)}"
-            if random_suggestion not in available_suggestions:
-                available_suggestions.append(random_suggestion)
-        
-        return jsonify({'suggestions': available_suggestions[:3]}), 200
-        
-    except Exception as e:
-        return jsonify({'error': 'Failed to generate suggestions', 'details': str(e)}), 500
-
-
-# ==================== Student Management Routes (Admin) ====================
-
-@app.route('/api/admin/students', methods=['POST'])
-@role_required('admin')
-def admin_add_student():
-    """Add new student"""
-    try:
-        from database import generate_registration_number
-        
-        data = request.get_json()
-        
-        # Validate required fields
-        required_fields = ['username', 'password', 'name', 'email', 'phone']
-        for field in required_fields:
-            if not data.get(field):
-                return jsonify({'error': f'{field} is required'}), 400
-        
-        conn = get_db_connection()
-        
-        # Check for duplicate username
-        existing = conn.execute('SELECT id FROM students WHERE username = ?', (data['username'],)).fetchone()
-        if existing:
-            conn.close()
-            return jsonify({'error': 'Username already exists'}), 400
-        
-        # Generate registration number
-        reg_no = generate_registration_number()
-        
-        # Hash password
-        hashed_pw = hash_password(data['password'])
-        
-        # Insert student
-        cursor = conn.execute('''
-            INSERT INTO students (registration_no, username, password, name, email, phone, role)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            reg_no,
-            data['username'],
-            hashed_pw,
-            data['name'],
-            data['email'],
-            data['phone'],
-            'student'
-        ))
-        
+        cursor = conn.execute(
+            '''INSERT INTO students (registration_no, username, password, name, email, phone, role)
+               VALUES (?, ?, ?, ?, ?, ?, ?)''',
+            (reg_no, data.username, hashed_pw, data.name, data.email, data.phone, 'student')
+        )
         conn.commit()
         
-        # Get created student
         new_student = conn.execute('SELECT * FROM students WHERE id = ?', (cursor.lastrowid,)).fetchone()
         conn.close()
         
         student_dict = row_to_dict(new_student)
         student_dict.pop('password', None)
         
-        return jsonify({'success': True, 'student': student_dict}), 201
-        
+        return {'success': True, 'student': student_dict}
     except Exception as e:
-        return jsonify({'error': 'Failed to add student', 'details': str(e)}), 500
+        raise HTTPException(status_code=500, detail=f"Failed to add student: {str(e)}")
 
 
-@app.route('/api/admin/students/<int:student_id>', methods=['PUT'])
-@role_required('admin')
-def admin_update_student(student_id):
-    """Update student details (NOT registration_no)"""
+@app.put("/api/admin/students/{student_id}")
+async def admin_update_student(student_id: int = Path(...), data: UpdateStudentRequest = Body(...), claims = Depends(verify_admin)):
+    """Update student (admin only)"""
     try:
-        data = request.get_json()
         conn = get_db_connection()
         
-        # Check if student exists
         student = conn.execute('SELECT * FROM students WHERE id = ?', (student_id,)).fetchone()
         if not student:
             conn.close()
-            return jsonify({'error': 'Student not found'}), 404
+            raise HTTPException(status_code=404, detail="Student not found")
         
-        # Build update query (registration_no CANNOT be updated)
-        update_fields = []
-        update_values = []
+        update_fields, update_values = [], []
         
-        if 'name' in data:
+        if data.name is not None:
             update_fields.append('name = ?')
-            update_values.append(data['name'])
-        
-        if 'email' in data:
+            update_values.append(data.name)
+        if data.email is not None:
             update_fields.append('email = ?')
-            update_values.append(data['email'])
-        
-        if 'phone' in data:
+            update_values.append(data.email)
+        if data.phone is not None:
             update_fields.append('phone = ?')
-            update_values.append(data['phone'])
-        
-        if 'password' in data and data['password']:
+            update_values.append(data.phone)
+        if data.password is not None and data.password != "":
             update_fields.append('password = ?')
-            update_values.append(hash_password(data['password']))
+            update_values.append(hash_password(data.password))
         
         if update_fields:
             update_values.append(student_id)
@@ -1124,33 +589,28 @@ def admin_update_student(student_id):
             conn.execute(query, update_values)
             conn.commit()
         
-        # Get updated student
         updated_student = conn.execute('SELECT * FROM students WHERE id = ?', (student_id,)).fetchone()
         conn.close()
         
         student_dict = row_to_dict(updated_student)
         student_dict.pop('password', None)
         
-        return jsonify({'success': True, 'student': student_dict}), 200
-        
+        return {'success': True, 'student': student_dict}
     except Exception as e:
-        return jsonify({'error': 'Failed to update student', 'details': str(e)}), 500
+        raise HTTPException(status_code=500, detail=f"Failed to update student: {str(e)}")
 
 
-@app.route('/api/admin/students/<int:student_id>', methods=['DELETE'])
-@role_required('admin')
-def admin_delete_student(student_id):
-    """Delete student (including default students)"""
+@app.delete("/api/admin/students/{student_id}")
+async def admin_delete_student(student_id: int = Path(...), claims = Depends(verify_admin)):
+    """Delete student (admin only)"""
     try:
         conn = get_db_connection()
         
-        # Check if student exists
         student = conn.execute('SELECT * FROM students WHERE id = ?', (student_id,)).fetchone()
         if not student:
             conn.close()
-            return jsonify({'error': 'Student not found'}), 404
+            raise HTTPException(status_code=404, detail="Student not found")
         
-        # Check if student has borrowed books
         borrowed = conn.execute(
             'SELECT id FROM transactions WHERE student_id = ? AND status = ?',
             (student_id, 'borrowed')
@@ -1158,51 +618,535 @@ def admin_delete_student(student_id):
         
         if borrowed:
             conn.close()
-            return jsonify({'error': 'Cannot delete student with borrowed books. Ask them to return books first.'}), 400
+            raise HTTPException(status_code=400, detail="Cannot delete student with borrowed books")
         
-        # Delete student
         conn.execute('DELETE FROM students WHERE id = ?', (student_id,))
         conn.commit()
         conn.close()
         
-        return jsonify({'success': True, 'message': 'Student deleted successfully'}), 200
-        
+        return {'success': True, 'message': 'Student deleted successfully'}
     except Exception as e:
-        return jsonify({'error': 'Failed to delete student', 'details': str(e)}), 500
+        raise HTTPException(status_code=500, detail=f"Failed to delete student: {str(e)}")
 
 
-@app.route('/api/admin/students/search', methods=['GET'])
-@role_required('admin')
-def admin_search_students():
-    """Search students by name, registration number, or username"""
+@app.get("/api/admin/students/search")
+async def admin_search_students(query: str = Query(...), claims = Depends(verify_admin)):
+    """Search students by name, email, username, or registration number"""
     try:
-        query = request.args.get('q', '').strip()
-        
         conn = get_db_connection()
+        search_term = f"%{query}%"
         
-        if query:
-            students = conn.execute('''
-                SELECT * FROM students
-                WHERE name LIKE ? OR registration_no LIKE ? OR username LIKE ? OR email LIKE ?
-                ORDER BY created_at DESC
-            ''', (f'%{query}%', f'%{query}%', f'%{query}%', f'%{query}%')).fetchall()
-        else:
-            students = conn.execute('SELECT * FROM students ORDER BY created_at DESC').fetchall()
+        students = conn.execute(
+            '''SELECT * FROM students WHERE name LIKE ? OR email LIKE ? OR username LIKE ? OR registration_no LIKE ?
+               ORDER BY created_at DESC''',
+            (search_term, search_term, search_term, search_term)
+        ).fetchall()
         
         conn.close()
         
-        student_list = []
-        for student in students:
-            student_dict = row_to_dict(student)
-            student_dict.pop('password', None)
-            student_list.append(student_dict)
+        students_list = rows_to_dict_list(students)
+        for student in students_list:
+            student.pop('password', None)
         
-        return jsonify(student_list), 200
-        
+        return students_list
     except Exception as e:
-        return jsonify({'error': 'Failed to search students', 'details': str(e)}), 500
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(debug=True, host='0.0.0.0', port=port)
+# ==================== Admin Transaction Routes ====================
+@app.get("/api/admin/transactions")
+async def admin_get_transactions(claims = Depends(verify_admin)):
+    """Get all transactions (admin only)"""
+    try:
+        conn = get_db_connection()
+        transactions = conn.execute(
+            '''SELECT t.*, s.name as student_name, s.registration_no, b.title as book_title
+               FROM transactions t
+               JOIN students s ON t.student_id = s.id
+               JOIN books b ON t.book_id = b.id
+               ORDER BY t.created_at DESC'''
+        ).fetchall()
+        conn.close()
+        return rows_to_dict_list(transactions)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch transactions: {str(e)}")
+
+
+@app.get("/api/admin/overdue")
+async def admin_get_overdue(claims = Depends(verify_admin)):
+    """Get overdue books (admin only)"""
+    try:
+        conn = get_db_connection()
+        overdue = conn.execute(
+            '''SELECT t.*, s.name as student_name, s.registration_no, b.title as book_title,
+                      strftime('%s', 'now') - strftime('%s', t.due_date) as days_overdue
+               FROM transactions t
+               JOIN students s ON t.student_id = s.id
+               JOIN books b ON t.book_id = b.id
+               WHERE t.status = 'borrowed' AND t.due_date < datetime('now')
+               ORDER BY t.due_date ASC'''
+        ).fetchall()
+        conn.close()
+        return rows_to_dict_list(overdue)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch overdue books: {str(e)}")
+
+
+@app.post("/api/admin/return/{transaction_id}")
+async def admin_return_book(transaction_id: int = Path(...), claims = Depends(verify_admin)):
+    """Process book return (admin only)"""
+    try:
+        conn = get_db_connection()
+        
+        transaction = conn.execute('SELECT * FROM transactions WHERE id = ?', (transaction_id,)).fetchone()
+        if not transaction:
+            conn.close()
+            raise HTTPException(status_code=404, detail="Transaction not found")
+        
+        if transaction['status'] != 'borrowed':
+            conn.close()
+            raise HTTPException(status_code=400, detail="Book not currently borrowed")
+        
+        fine_amount = calculate_fine(transaction['due_date'])
+        
+        conn.execute(
+            '''UPDATE transactions SET status = ?, return_date = ?, fine_amount = ?
+               WHERE id = ?''',
+            ('returned', datetime.now().isoformat(), fine_amount, transaction_id)
+        )
+        
+        conn.execute(
+            'UPDATE books SET available = available + 1 WHERE id = ?',
+            (transaction['book_id'],)
+        )
+        
+        conn.execute(
+            'UPDATE students SET borrowed_books = borrowed_books - 1, fine_amount = fine_amount + ? WHERE id = ?',
+            (fine_amount, transaction['student_id'])
+        )
+        
+        conn.commit()
+        conn.close()
+        
+        return {
+            'success': True,
+            'message': 'Book returned successfully',
+            'fine_amount': fine_amount
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to return book: {str(e)}")
+
+
+@app.get("/api/admin/stats")
+async def admin_get_stats(claims = Depends(verify_admin)):
+    """Get admin dashboard statistics"""
+    try:
+        conn = get_db_connection()
+        
+        total_books = conn.execute('SELECT COUNT(*) as count FROM books').fetchone()['count']
+        total_students = conn.execute('SELECT COUNT(*) as count FROM students').fetchone()['count']
+        active_borrows = conn.execute(
+            'SELECT COUNT(*) as count FROM transactions WHERE status = ?', ('borrowed',)
+        ).fetchone()['count']
+        overdue_books = conn.execute(
+            '''SELECT COUNT(*) as count FROM transactions
+               WHERE status = ? AND due_date < datetime('now')''', ('borrowed',)
+        ).fetchone()['count']
+        total_transactions = conn.execute(
+            'SELECT COUNT(*) as count FROM transactions'
+        ).fetchone()['count']
+        total_fines = conn.execute(
+            'SELECT SUM(fine_amount) as total FROM transactions WHERE fine_amount > 0'
+        ).fetchone()['total']
+        conn.close()
+        
+        return {
+            'total_books': total_books,
+            'total_students': total_students,
+            'active_borrows': active_borrows,
+            'overdue_books': overdue_books,
+            'total_transactions': total_transactions,
+            'total_fines': total_fines if total_fines is not None else 0
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch stats: {str(e)}")
+
+# ==================== Student Routes ====================
+@app.get("/api/student/books")
+async def student_get_available_books(claims = Depends(verify_student)):
+    """Get available books for borrowing"""
+    try:
+        conn = get_db_connection()
+        books = conn.execute('SELECT * FROM books ORDER BY title ASC').fetchall()
+        conn.close()
+        return rows_to_dict_list(books)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch books: {str(e)}")
+
+def get_next_transaction_id():
+    """Generate next transaction ID in form TXN0001 based on highest id."""
+    conn = get_db_connection()
+    try:
+        last_id_row = conn.execute('SELECT MAX(id) as max_id FROM transactions').fetchone()
+        max_id = last_id_row['max_id'] if last_id_row else None
+        if not max_id:
+            next_num = 1
+        else:
+            next_num = int(max_id) + 1
+        return f'TXN{str(next_num).zfill(4)}'
+    finally:
+        conn.close()
+
+
+@app.get("/api/student/my-books")
+async def student_get_my_books(claims = Depends(verify_student)):
+    """Get student's borrowed books"""
+    try:
+        student_id = claims.get('id')
+        conn = get_db_connection()
+        transactions = conn.execute(
+            '''SELECT t.*, b.title as book_title, b.author as book_author, b.isbn
+               FROM transactions t
+               JOIN books b ON t.book_id = b.id
+               WHERE t.student_id = ? AND t.status = 'borrowed'
+               ORDER BY t.borrow_date DESC''',
+            (student_id,)
+        ).fetchall()
+        conn.close()
+        return [
+            {
+                "transaction_id": row["transaction_id"],
+                "borrow_date": row["borrow_date"],
+                "due_date": row["due_date"],
+                "fine": row["fine_amount"],
+                "book": {
+                    "title": row["book_title"],
+                    "author": row["book_author"]
+                }
+                # add other fields as needed
+            }
+            for row in transactions
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch borrowed books: {str(e)}")
+
+@app.post("/api/student/borrow")
+async def student_borrow_book(data: BorrowBookRequest = Body(...), claims = Depends(verify_student)):
+    """
+    Borrow a book with improved error handling, validation, and concurrency control.
+    
+    Changes:
+    - Validates all inputs before DB operations
+    - Retries on transient database locks
+    - Checks for duplicate borrow attempts
+    - Logs detailed error messages
+    - Better transaction rollback handling
+    """
+    conn = None
+    try:
+        # === STEP 1: Validate student identity ===
+        student_id = claims.get('id')
+        if not student_id or not isinstance(student_id, int):
+            raise HTTPException(
+                status_code=401, 
+                detail="Invalid student credentials: missing or malformed id in token"
+            )
+        
+        # === STEP 2: Validate book_id ===
+        if not isinstance(data.book_id, int) or data.book_id <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid book ID: must be a positive integer"
+            )
+        
+        # === STEP 3: Get database connection with retry logic ===
+        max_retries = 3
+        retry_count = 0
+        last_error = None
+        
+        while retry_count < max_retries:
+            try:
+                conn = get_db_connection()
+                break
+            except Exception as db_error:
+                last_error = db_error
+                retry_count += 1
+                if retry_count < max_retries:
+                    await asyncio.sleep(0.1)  # Small backoff
+        
+        if not conn:
+            raise HTTPException(
+                status_code=503,
+                detail="Database temporarily unavailable. Please try again in a moment."
+            )
+        
+        # === STEP 4: Start transaction with immediate write lock ===
+        try:
+            conn.execute("BEGIN IMMEDIATE;")
+        except Exception as lock_error:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Database is busy. Please try again. Error: {str(lock_error)}"
+            )
+        
+        try:
+            # === STEP 5: Fetch and validate student ===
+            student_row = conn.execute(
+                'SELECT * FROM students WHERE id = ?', 
+                (student_id,)
+            ).fetchone()
+            
+            if not student_row:
+                conn.rollback()
+                raise HTTPException(status_code=404, detail="Student not found in database")
+            
+            student = dict(student_row)
+            borrowed_count = int(student.get('borrowed_books', 0))
+            student_name = student.get('name', 'Unknown')
+            
+            # === STEP 6: Check borrow limit ===
+            if borrowed_count >= MAX_BOOKS_PER_STUDENT:
+                conn.rollback()
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Borrow limit reached. You have {borrowed_count}/{MAX_BOOKS_PER_STUDENT} books. Please return a book first."
+                )
+            
+            # === STEP 7: Fetch and validate book ===
+            book_row = conn.execute(
+                'SELECT * FROM books WHERE id = ?', 
+                (data.book_id,)
+            ).fetchone()
+            
+            if not book_row:
+                conn.rollback()
+                raise HTTPException(status_code=404, detail=f"Book with ID {data.book_id} not found")
+            
+            book = dict(book_row)
+            available = int(book.get('available', 0))
+            book_title = book.get('title', 'Unknown')
+            
+            if available <= 0:
+                conn.rollback()
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"'{book_title}' is not available. Total copies: {book.get('quantity', 0)}, Available: {available}"
+                )
+            
+            # === STEP 8: Check for duplicate borrow (prevent same book twice) ===
+            existing_borrow = conn.execute(
+                'SELECT id FROM transactions WHERE student_id = ? AND book_id = ? AND status = ?',
+                (student_id, data.book_id, 'borrowed')
+            ).fetchone()
+            
+            if existing_borrow:
+                conn.rollback()
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"You have already borrowed '{book_title}'. Please return it before borrowing another copy."
+                )
+            
+            # === STEP 9: Create borrow transaction ===
+            borrow_date = datetime.now()
+            due_date = borrow_date + timedelta(days=RETURN_DAYS)
+            
+            cur = conn.cursor()
+            next_txn_id = get_next_transaction_id()
+            # Now include next_txn_id in the insert:
+            cur.execute('''
+                INSERT INTO transactions
+                (transaction_id, student_id, student_registration_no, book_id, borrow_date, due_date, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                next_txn_id, student_id, student.get('registration_no', ''), data.book_id, borrow_date.isoformat(), due_date.isoformat(), 'borrowed'
+            ))
+
+            
+            trans_id = cur.lastrowid
+            
+            # === STEP 10: Retrieve trigger-generated transaction_id ===
+            txn_row = conn.execute(
+                'SELECT transaction_id FROM transactions WHERE id = ?', 
+                (trans_id,)
+            ).fetchone()
+            
+            transaction_code = (
+                txn_row['transaction_id'] 
+                if txn_row and txn_row['transaction_id'] 
+                else f"TXN{str(trans_id).zfill(4)}"
+            )
+            
+            # === STEP 11: Update book availability ===
+            conn.execute(
+                'UPDATE books SET available = available - 1 WHERE id = ?', 
+                (data.book_id,)
+            )
+            
+            # === STEP 12: Update student borrowed count ===
+            conn.execute(
+                'UPDATE students SET borrowed_books = borrowed_books + 1 WHERE id = ?', 
+                (student_id,)
+            )
+            
+            # === STEP 13: Commit all changes ===
+            conn.commit()
+            
+            # === STEP 14: Return success response ===
+            return {
+                'success': True,
+                'message': f'Book "{book_title}" borrowed successfully',
+                'transaction_id': transaction_code,
+                'due_date': due_date.isoformat(),
+                'days_to_return': RETURN_DAYS,
+                'book': {
+                    'id': book.get('id'),
+                    'title': book_title,
+                    'author': book.get('author')
+                },
+                'student': {
+                    'id': student_id,
+                    'name': student_name,
+                    'borrowed_count': borrowed_count + 1,
+                    'max_borrow': MAX_BOOKS_PER_STUDENT
+                }
+            }
+        
+        except HTTPException:
+            # Re-raise HTTP exceptions after rollback
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception as rb_error:
+                    print(f"WARNING: Rollback failed: {rb_error}", flush=True)
+            raise
+        
+        except Exception as inner_error:
+            # Catch unexpected errors during transaction
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception as rb_error:
+                    print(f"WARNING: Rollback failed after inner error: {rb_error}", flush=True)
+            
+            error_msg = f"Transaction processing failed: {str(inner_error)}"
+            print(f"ERROR in student_borrow_book (inner): {error_msg}", flush=True)
+            raise HTTPException(status_code=500, detail=error_msg)
+    
+    except HTTPException:
+        raise
+    
+    except Exception as error:
+        # Catch unexpected errors (e.g., connection issues)
+        error_msg = f"Borrow operation failed: {str(error)}"
+        print(f"ERROR in student_borrow_book (outer): {error_msg}", flush=True)
+        raise HTTPException(status_code=500, detail=error_msg)
+    
+    finally:
+        # Always close connection
+        if conn:
+            try:
+                conn.close()
+            except Exception as close_error:
+                print(f"WARNING: Error closing database connection: {close_error}", flush=True)
+
+
+@app.post("/api/student/return")
+async def student_return_book(data: ReturnBookRequest, claims = Depends(verify_student)):
+    """Return a borrowed book"""
+    try:
+        student_id = claims.get('id')
+        conn = get_db_connection()
+        
+        transaction = conn.execute('SELECT * FROM transactions WHERE id = ?', (data.transaction_id,)).fetchone()
+        if not transaction or transaction['student_id'] != student_id:
+            conn.close()
+            raise HTTPException(status_code=404, detail="Transaction not found")
+        
+        if transaction['status'] != 'borrowed':
+            conn.close()
+            raise HTTPException(status_code=400, detail="Book not currently borrowed")
+        
+        fine_amount = calculate_fine(transaction['due_date'])
+        
+        conn.execute(
+            '''UPDATE transactions SET status = ?, return_date = ?, fine_amount = ?
+               WHERE id = ?''',
+            ('returned', datetime.now().isoformat(), fine_amount, data.transaction_id)
+        )
+        
+        conn.execute('UPDATE books SET available = available + 1 WHERE id = ?', (transaction['book_id'],))
+        conn.execute('UPDATE students SET borrowed_books = borrowed_books - 1, fine_amount = fine_amount + ? WHERE id = ?',
+                     (fine_amount, student_id))
+        
+        conn.commit()
+        conn.close()
+        
+        return {
+            'success': True,
+            'message': 'Book returned successfully',
+            'fine_amount': fine_amount
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to return book: {str(e)}")
+
+
+@app.get("/api/student/fines")
+async def student_get_fines(claims = Depends(verify_student)):
+    """Get student's fine information"""
+    try:
+        student_id = claims.get('id')
+        conn = get_db_connection()
+        
+        student = conn.execute('SELECT fine_amount, borrowed_books FROM students WHERE id = ?', (student_id,)).fetchone()
+        conn.close()
+        
+        return {
+            'fine_amount': student['fine_amount'],
+            'borrowed_books': student['borrowed_books']
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch fines: {str(e)}")
+
+
+@app.get("/api/student/history")
+async def student_get_transaction_history(claims = Depends(verify_student)):
+    """Get student's complete transaction history"""
+    try:
+        student_id = claims.get('id')
+        conn = get_db_connection()
+        
+        transactions = conn.execute(
+            '''SELECT t.*, b.title, b.author
+               FROM transactions t
+               JOIN books b ON t.book_id = b.id
+               WHERE t.student_id = ?
+               ORDER BY t.created_at DESC''',
+            (student_id,)
+        ).fetchall()
+        
+        conn.close()
+        return rows_to_dict_list(transactions)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch history: {str(e)}")
+
+
+# ==================== Error Handlers ====================
+@app.exception_handler(404)
+async def not_found_handler(request, exc):
+    return JSONResponse(
+        status_code=404,
+        content={"error": "Endpoint not found"}
+    )
+
+
+@app.exception_handler(500)
+async def internal_error_handler(request, exc):
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Internal server error"}
+    )
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=5000)
