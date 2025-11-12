@@ -5,3 +5,4 @@ aiosqlite
 pydantic
 python-multipart
 httpx
+fastapi-jwt-auth
