@@ -1,8 +1,8 @@
 fastapi==0.104.1
-uvicorn
-sqlalchemy
-aiosqlite
+uvicorn==0.23.2
+sqlalchemy==2.0.23
+aiosqlite==0.19.0
 pydantic==1.10.13
-python-multipart
-httpx
-fastapi-jwt-auth
+python-multipart==0.0.6
+httpx==0.24.1
+fastapi-jwt-auth==0.5.0
