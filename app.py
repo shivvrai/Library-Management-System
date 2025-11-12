@@ -57,7 +57,8 @@ app = FastAPI(
 # CORS Configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],  # add prod origins later
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173","https://library-management-system-three-pi.vercel.app/",
+                   ],  # add prod origins later
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -815,6 +816,7 @@ async def student_get_my_books(claims = Depends(verify_student)):
         conn.close()
         return [
             {
+                "id": row["id"],
                 "transaction_id": row["transaction_id"],
                 "borrow_date": row["borrow_date"],
                 "due_date": row["due_date"],
