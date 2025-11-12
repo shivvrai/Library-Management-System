@@ -1,33 +1,27 @@
-annotated-types==0.7.0
-anyio==3.7.1
-bcrypt==5.0.0
-blinker==1.9.0
-certifi==2025.10.5
-charset-normalizer==3.4.4
-click==8.3.0
-colorama==0.4.6
+# Core FastAPI stack
 fastapi==0.104.1
-fastapi-jwt-auth==0.5.0
-Flask==3.1.2
-flask-cors==6.0.1
-Flask-JWT-Extended==4.7.1
-h11==0.16.0
-httptools==0.7.1
-idna==3.11
-itsdangerous==2.2.0
-Jinja2==3.1.6
-MarkupSafe==3.0.3
-pydantic==1.10.24
-PyJWT==1.7.1
-python-dotenv==1.2.1
-python-multipart==0.0.6
-PyYAML==6.0.3
-requests==2.32.5
-sniffio==1.3.1
 starlette==0.27.0
-typing_extensions==4.15.0
-urllib3==2.5.0
 uvicorn==0.24.0
-watchfiles==1.1.1
+
+# JWT authentication
+fastapi-jwt-auth==0.5.0
+PyJWT==1.7.1
+
+# Database and hashing
+bcrypt==5.0.0
+python-dotenv==1.2.1
+
+# Utilities
+requests==2.32.3
+anyio==3.7.1
+typing_extensions==4.15.0
+pydantic==1.10.14
+PyYAML==6.0.3
+python-multipart==0.0.6
+
+# CORS middleware
+httptools==0.7.1
 websockets==15.0.1
-Werkzeug==3.1.3
+watchfiles==1.1.1
+colorama==0.4.6
+click==8.1.7
