@@ -11,7 +11,7 @@ from fastapi import FastAPI, Depends, HTTPException, status, Query, Body, Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import jwt
-from jwt.exceptions import PyJWTError
+# from jwt.exceptions import PyJWTError
 from pydantic import BaseModel
 import traceback
 from contextlib import asynccontextmanager
@@ -41,7 +41,7 @@ def decode_access_token(token: str):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
-    except PyJWTError:
+    except jwt.exceptions.InvalidTokenError:
         return None
 
 
@@ -203,7 +203,7 @@ async def extract_claims(token: str = Depends(oauth2_scheme)):
         if isinstance(user_claims, dict):
             merged.update(user_claims)
         return merged
-    except PyJWTError:
+    except jwt.exceptions.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid or expired JWT token")
 
 
