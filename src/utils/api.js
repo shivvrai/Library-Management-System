@@ -7,7 +7,7 @@ import { getToken } from './auth';
  */
 export const API_BASE = import.meta.env.DEV
   ? '/api'
-  : (import.meta.env.VITE_API_URL || 'https://library-management-system-aahl.onrender.com/api');
+  : (import.meta.env.VITE_API_URL || 'https://library-management-system-1-xvpe.onrender.com');
 
 export async function apiCall(endpoint, options = {}) {
   if (!endpoint || typeof endpoint !== 'string') throw new Error('apiCall: endpoint must be a string');
