@@ -80,7 +80,7 @@ app = FastAPI(
 # CORS Configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173","https://library-management-system-three-pi.vercel.app/",
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173","https://library-management-system-three-pi.vercel.app",
                    ],  # add prod origins later
     allow_credentials=True,
     allow_methods=["*"],
