@@ -10,17 +10,40 @@ from fastapi import Request
 from fastapi import FastAPI, Depends, HTTPException, status, Query, Body, Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi_jwt_auth import AuthJWT
-from fastapi_jwt_auth.exceptions import AuthJWTException
+import jwt
+from jwt.exceptions import PyJWTError
 from pydantic import BaseModel
 import traceback
 from contextlib import asynccontextmanager
+
 from database import (
     get_db_connection,
     hash_password,
     verify_password,
     generate_registration_number,
 )
+from fastapi.security import OAuth2PasswordBearer
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+
+
+SECRET_KEY = "your-very-secret-key"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 24 hours
+
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+def decode_access_token(token: str):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except PyJWTError:
+        return None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -69,13 +92,20 @@ app.add_middleware(
 
 
 # JWT Configuration
-class Settings(BaseModel):
-    authjwt_secret_key: str = os.environ.get('JWT_SECRET_KEY', 'library-system-secret-key-2025')
-    authjwt_access_token_expires: int = 60 * 24  # 24 hours in minutes
+# class Settings(BaseModel):
+#     authjwt_secret_key: str = os.environ.get('JWT_SECRET_KEY', 'library-system-secret-key-2025')
+#     authjwt_access_token_expires: int = 60 * 24  # 24 hours in minutes
 
-@AuthJWT.load_config
-def get_config():
-    return Settings()
+# @AuthJWT.load_config
+# def get_config():
+#     return Settings()
+def create_access_token(subject: str, user_claims: dict, expires_delta: timedelta = None):
+    to_encode = user_claims.copy()
+    to_encode.update({
+        "sub": subject,
+        "exp": datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    })
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
 
@@ -164,54 +194,50 @@ def calculate_fine(due_date_str: str) -> float:
 
 # ==================== Dependency Injection for Roles ====================
 
-async def _extract_claims(Authorize: AuthJWT):
-    Authorize.jwt_required()
-    raw = Authorize.get_raw_jwt() or {}
-    user_claims = raw.get("user_claims") or raw.get("claims") or {}
-    merged = {}
-    merged.update(raw)
-    if isinstance(user_claims, dict):
-        merged.update(user_claims)
-    return merged
+async def extract_claims(token: str = Depends(oauth2_scheme)):
+    try:
+        raw = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        # merge claims if you stored some under "claims"/"user_claims"
+        user_claims = raw.get("user_claims") or raw.get("claims") or {}
+        merged = raw.copy()
+        if isinstance(user_claims, dict):
+            merged.update(user_claims)
+        return merged
+    except PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired JWT token")
 
-async def verify_admin(Authorize: AuthJWT = Depends(), request: Request = None):
+
+async def verify_admin(
+    claims: dict = Depends(extract_claims),
+    request: Request = None
+):
     if request is not None and request.method == "OPTIONS":
         return {}
-    try:
-        claims = await _extract_claims(Authorize)
-        print("DEBUG verify_admin claims:", claims)
-        if claims.get("role") != "admin":
-            raise HTTPException(status_code=403, detail="Admin access required")
-        return claims
-    except AuthJWTException as e:
-        print("DEBUG Auth error (admin):", e)
-        raise HTTPException(status_code=401, detail="Authentication required")
-
-async def verify_student(Authorize: AuthJWT = Depends(), request: Request = None):
+    print("DEBUG verify_admin claims:", claims)
+    if claims.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return claims
+async def verify_student(
+    claims: dict = Depends(extract_claims),
+    request: Request = None
+):
     if request is not None and request.method == "OPTIONS":
         return {}
-    try:
-        claims = await _extract_claims(Authorize)
-        print("DEBUG verify_student claims:", claims)
-        if claims.get("role") != "student":
-            raise HTTPException(status_code=403, detail="Student access required")
-        if not claims.get("id"):
-            raise HTTPException(status_code=401, detail="Authentication required: missing user id")
-        return claims
-    except AuthJWTException as e:
-        print("DEBUG Auth error (student):", e)
-        raise HTTPException(status_code=401, detail="Authentication required")
-
-async def verify_any_user(Authorize: AuthJWT = Depends(), request: Request = None):
+    print("DEBUG verify_student claims:", claims)
+    if claims.get("role") != "student":
+        raise HTTPException(status_code=403, detail="Student access required")
+    if not claims.get("id"):
+        raise HTTPException(status_code=401, detail="Authentication required: missing user id")
+    return claims
+async def verify_any_user(
+    claims: dict = Depends(extract_claims),
+    request: Request = None
+):
     if request is not None and request.method == "OPTIONS":
         return {}
-    try:
-        claims = await _extract_claims(Authorize)
-        print("DEBUG verify_any_user claims:", claims)
-        return claims
-    except AuthJWTException as e:
-        print("DEBUG Auth error (any):", e)
-        raise HTTPException(status_code=401, detail="Authentication required")
+    print("DEBUG verify_any_user claims:", claims)
+    return claims
+
 
 # ==================== Root & Health Check ====================
 @app.get("/")
@@ -232,28 +258,26 @@ async def health_check():
 
 # ==================== Authentication Routes ====================
 @app.post("/api/auth/login")
-async def login(data: LoginRequest, Authorize: AuthJWT = Depends()):
+async def login(data: LoginRequest):
     """Login endpoint for admin or student"""
     try:
         username = data.username.strip()
         password = data.password
-        
+
         if not username or not password:
             raise HTTPException(status_code=400, detail="Username and password are required")
-        
+
         conn = get_db_connection()
-        
+
         # Check admin
         admin = conn.execute('SELECT * FROM admins WHERE username = ?', (username,)).fetchone()
         if admin and verify_password(password, admin['password']):
-            access_token = Authorize.create_access_token(
-                subject=username,
-                user_claims={
-                    'role': admin['role'],
-                    'name': admin['name'],
-                    'id': admin['id']
-                }
-            )
+            user_claims = {
+                'role': admin['role'],
+                'name': admin['name'],
+                'id': admin['id']
+            }
+            access_token = create_access_token(username, user_claims)
             conn.close()
             return {
                 'success': True,
@@ -264,18 +288,18 @@ async def login(data: LoginRequest, Authorize: AuthJWT = Depends()):
                     'name': admin['name']
                 }
             }
-        
+
         # Check student
         student = conn.execute('SELECT * FROM students WHERE username = ?', (username,)).fetchone()
         if student and verify_password(password, student['password']):
-            access_token = Authorize.create_access_token(
-                subject=username,
-                user_claims={
-                    'role': student['role'],
-                    'id': student['id'],
-                    'name': student['name']
-                }
-            )
+            user_claims = {
+                'role': student['role'],
+                'id': student['id'],
+                'name': student['name'],
+                'borrowed_books': student['borrowed_books'],
+                'fine_amount': student['fine_amount']
+            }
+            access_token = create_access_token(username, user_claims)
             conn.close()
             return {
                 'success': True,
@@ -289,7 +313,7 @@ async def login(data: LoginRequest, Authorize: AuthJWT = Depends()):
                     'fine_amount': student['fine_amount']
                 }
             }
-        
+
         conn.close()
         raise HTTPException(status_code=401, detail="Invalid credentials")
     except Exception as e:
