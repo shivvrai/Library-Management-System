@@ -1,4 +1,4 @@
-# app.py - FastAPI Backend with SQLite Database Integration
+
 import random
 import os
 import asyncio
@@ -47,7 +47,7 @@ def decode_access_token(token: str):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # startup logic
+ 
     try:
         from database import init_database
         if not os.path.exists('library.db'):
@@ -69,7 +69,7 @@ async def lifespan(app: FastAPI):
     except Exception:
         print("❌ Error during shutdown:")
         traceback.print_exc()
-# ==================== FastAPI Setup ====================
+
 app = FastAPI(
     title="Library Management System",
     description="Backend API for Library Management",
@@ -81,7 +81,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173","https://library-management-system-three-pi.vercel.app",
-                   ],  # add prod origins later
+                   ],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -114,7 +114,7 @@ FINE_PER_DAY = 10
 MAX_BOOKS_PER_STUDENT = 3
 RETURN_DAYS = 7
 
-# ==================== Pydantic Models ====================
+
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -162,7 +162,7 @@ class BorrowBookRequest(BaseModel):
 class ReturnBookRequest(BaseModel):
     transaction_id: int
 
-# ==================== Utility Functions ====================
+
 def validate_isbn13(isbn: str) -> bool:
     """Validate ISBN-13 format"""
     isbn = re.sub(r'[-\s]', '', isbn)
@@ -192,12 +192,10 @@ def calculate_fine(due_date_str: str) -> float:
         return days_overdue * FINE_PER_DAY
     return 0
 
-# ==================== Dependency Injection for Roles ====================
 
 async def extract_claims(token: str = Depends(oauth2_scheme)):
     try:
         raw = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        # merge claims if you stored some under "claims"/"user_claims"
         user_claims = raw.get("user_claims") or raw.get("claims") or {}
         merged = raw.copy()
         if isinstance(user_claims, dict):
@@ -256,7 +254,7 @@ async def health_check():
         "timestamp": datetime.now().isoformat()
     }
 
-# ==================== Authentication Routes ====================
+
 @app.post("/api/auth/login")
 async def login(data: LoginRequest):
     """Login endpoint for admin or student"""
@@ -324,14 +322,10 @@ async def register(data: RegisterRequest):
     """Register new student"""
     try:
         conn = get_db_connection()
-        
-        # Check if username exists
         existing = conn.execute('SELECT id FROM students WHERE username = ?', (data.username,)).fetchone()
         if existing:
             conn.close()
             raise HTTPException(status_code=400, detail="Username already exists")
-        
-        # Generate registration number
         reg_no = generate_registration_number()
         
         # Hash password
@@ -376,7 +370,6 @@ async def check_username(username: str = Query(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Check failed: {str(e)}")
 
-# ==================== Admin Book Routes ====================
 @app.get("/api/admin/books")
 async def admin_get_books(claims = Depends(verify_admin)):
     """Get all books (admin only)"""
@@ -531,8 +524,6 @@ async def admin_search_books(query: str = Query(...), claims = Depends(verify_ad
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
-
-# ==================== Admin Student Routes ====================
 @app.get("/api/admin/students")
 async def admin_get_students(claims = Depends(verify_admin)):
     """Get all students (admin only)"""
@@ -678,7 +669,6 @@ async def admin_search_students(query: str = Query(...), claims = Depends(verify
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
 
-# ==================== Admin Transaction Routes ====================
 @app.get("/api/admin/transactions")
 async def admin_get_transactions(claims = Depends(verify_admin)):
     """Get all transactions (admin only)"""
@@ -796,7 +786,7 @@ async def admin_get_stats(claims = Depends(verify_admin)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch stats: {str(e)}")
 
-# ==================== Student Routes ====================
+
 @app.get("/api/student/books")
 async def student_get_available_books(claims = Depends(verify_student)):
     """Get available books for borrowing"""
@@ -870,7 +860,7 @@ async def student_borrow_book(data: BorrowBookRequest = Body(...), claims = Depe
     """
     conn = None
     try:
-        # === STEP 1: Validate student identity ===
+       
         student_id = claims.get('id')
         if not student_id or not isinstance(student_id, int):
             raise HTTPException(
@@ -878,14 +868,13 @@ async def student_borrow_book(data: BorrowBookRequest = Body(...), claims = Depe
                 detail="Invalid student credentials: missing or malformed id in token"
             )
         
-        # === STEP 2: Validate book_id ===
         if not isinstance(data.book_id, int) or data.book_id <= 0:
             raise HTTPException(
                 status_code=400,
                 detail="Invalid book ID: must be a positive integer"
             )
         
-        # === STEP 3: Get database connection with retry logic ===
+     
         max_retries = 3
         retry_count = 0
         last_error = None
@@ -906,7 +895,6 @@ async def student_borrow_book(data: BorrowBookRequest = Body(...), claims = Depe
                 detail="Database temporarily unavailable. Please try again in a moment."
             )
         
-        # === STEP 4: Start transaction with immediate write lock ===
         try:
             conn.execute("BEGIN IMMEDIATE;")
         except Exception as lock_error:
@@ -916,7 +904,7 @@ async def student_borrow_book(data: BorrowBookRequest = Body(...), claims = Depe
             )
         
         try:
-            # === STEP 5: Fetch and validate student ===
+        
             student_row = conn.execute(
                 'SELECT * FROM students WHERE id = ?', 
                 (student_id,)
@@ -930,7 +918,7 @@ async def student_borrow_book(data: BorrowBookRequest = Body(...), claims = Depe
             borrowed_count = int(student.get('borrowed_books', 0))
             student_name = student.get('name', 'Unknown')
             
-            # === STEP 6: Check borrow limit ===
+       
             if borrowed_count >= MAX_BOOKS_PER_STUDENT:
                 conn.rollback()
                 raise HTTPException(
@@ -938,7 +926,7 @@ async def student_borrow_book(data: BorrowBookRequest = Body(...), claims = Depe
                     detail=f"Borrow limit reached. You have {borrowed_count}/{MAX_BOOKS_PER_STUDENT} books. Please return a book first."
                 )
             
-            # === STEP 7: Fetch and validate book ===
+     
             book_row = conn.execute(
                 'SELECT * FROM books WHERE id = ?', 
                 (data.book_id,)
@@ -958,8 +946,7 @@ async def student_borrow_book(data: BorrowBookRequest = Body(...), claims = Depe
                     status_code=400, 
                     detail=f"'{book_title}' is not available. Total copies: {book.get('quantity', 0)}, Available: {available}"
                 )
-            
-            # === STEP 8: Check for duplicate borrow (prevent same book twice) ===
+       
             existing_borrow = conn.execute(
                 'SELECT id FROM transactions WHERE student_id = ? AND book_id = ? AND status = ?',
                 (student_id, data.book_id, 'borrowed')
@@ -972,13 +959,13 @@ async def student_borrow_book(data: BorrowBookRequest = Body(...), claims = Depe
                     detail=f"You have already borrowed '{book_title}'. Please return it before borrowing another copy."
                 )
             
-            # === STEP 9: Create borrow transaction ===
+          
             borrow_date = datetime.now()
             due_date = borrow_date + timedelta(days=RETURN_DAYS)
             
             cur = conn.cursor()
             next_txn_id = get_next_transaction_id()
-            # Now include next_txn_id in the insert:
+          
             cur.execute('''
                 INSERT INTO transactions
                 (transaction_id, student_id, student_registration_no, book_id, borrow_date, due_date, status)
@@ -990,7 +977,6 @@ async def student_borrow_book(data: BorrowBookRequest = Body(...), claims = Depe
             
             trans_id = cur.lastrowid
             
-            # === STEP 10: Retrieve trigger-generated transaction_id ===
             txn_row = conn.execute(
                 'SELECT transaction_id FROM transactions WHERE id = ?', 
                 (trans_id,)
@@ -1002,22 +988,21 @@ async def student_borrow_book(data: BorrowBookRequest = Body(...), claims = Depe
                 else f"TXN{str(trans_id).zfill(4)}"
             )
             
-            # === STEP 11: Update book availability ===
+   
             conn.execute(
                 'UPDATE books SET available = available - 1 WHERE id = ?', 
                 (data.book_id,)
             )
             
-            # === STEP 12: Update student borrowed count ===
+           
             conn.execute(
                 'UPDATE students SET borrowed_books = borrowed_books + 1 WHERE id = ?', 
                 (student_id,)
             )
             
-            # === STEP 13: Commit all changes ===
+         
             conn.commit()
-            
-            # === STEP 14: Return success response ===
+         
             return {
                 'success': True,
                 'message': f'Book "{book_title}" borrowed successfully',
@@ -1038,7 +1023,7 @@ async def student_borrow_book(data: BorrowBookRequest = Body(...), claims = Depe
             }
         
         except HTTPException:
-            # Re-raise HTTP exceptions after rollback
+
             if conn:
                 try:
                     conn.rollback()
@@ -1047,7 +1032,7 @@ async def student_borrow_book(data: BorrowBookRequest = Body(...), claims = Depe
             raise
         
         except Exception as inner_error:
-            # Catch unexpected errors during transaction
+          
             if conn:
                 try:
                     conn.rollback()
@@ -1062,13 +1047,13 @@ async def student_borrow_book(data: BorrowBookRequest = Body(...), claims = Depe
         raise
     
     except Exception as error:
-        # Catch unexpected errors (e.g., connection issues)
+    
         error_msg = f"Borrow operation failed: {str(error)}"
         print(f"ERROR in student_borrow_book (outer): {error_msg}", flush=True)
         raise HTTPException(status_code=500, detail=error_msg)
     
     finally:
-        # Always close connection
+      
         if conn:
             try:
                 conn.close()
@@ -1156,7 +1141,7 @@ async def student_get_transaction_history(claims = Depends(verify_student)):
         raise HTTPException(status_code=500, detail=f"Failed to fetch history: {str(e)}")
 
 
-# ==================== Error Handlers ====================
+
 @app.exception_handler(404)
 async def not_found_handler(request, exc):
     return JSONResponse(
